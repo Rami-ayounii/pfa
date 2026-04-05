@@ -1,0 +1,63 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# GEO Pipeline — .gitignore
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── Python cache ──────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+*.pyd
+
+# ── Test / coverage cache ─────────────────────────────────────────────────────
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+*.egg-info/
+dist/
+build/
+
+# ── Environment & secrets ─────────────────────────────────────────────────────
+.env
+*.env
+.env.*
+!.env.example
+
+# ── Pipeline outputs (generated data — not source code) ───────────────────────
+geo_output/
+agent2_output/
+*.csv
+*.json
+!tests/**/*.json
+llm_cache.json
+
+# ── Jupyter notebooks checkpoints ─────────────────────────────────────────────
+.ipynb_checkpoints/
+*.ipynb
+
+# ── OS files ──────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── IDE / editor ──────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ── Logs ──────────────────────────────────────────────────────────────────────
+*.log
+logs/
+
+# ── Virtualenv / Conda ────────────────────────────────────────────────────────
+venv/
+env/
+.venv/
+*.egg
+
+# ── Selenium / browser drivers ────────────────────────────────────────────────
+chromedriver*
+geckodriver*
