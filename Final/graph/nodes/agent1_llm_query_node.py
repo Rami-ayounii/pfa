@@ -27,11 +27,29 @@ from loguru import logger
 
 from core.llm_client import async_query_llm, query_llm, MODEL_FAST
 
+# ── throttle constants (overridable via env / config.py) ────────────────────
+try:
+    from config import INTER_PROMPT_DELAY_S as _INTER_PROMPT_DELAY_S  # type: ignore
+except ImportError:
+    _INTER_PROMPT_DELAY_S = 0.6  # seconds; override via INTER_PROMPT_DELAY_S env var
+
+_STAGGER_S = 0.05  # 50 ms between coroutine launches within one prompt
+
 # System prompt for restaurant GEO queries
 _QUERY_SYSTEM_TEMPLATE = """\
 You are a helpful assistant knowledgeable about {domain}s.
 Answer naturally and helpfully. Mention specific establishment names when relevant.
 """
+
+
+# ── stagger helper ──────────────────────────────────────────────────────────
+
+async def _delayed_query(delay: float, model_id: str, prompt_text: str,
+                         system: str, role: str) -> dict:
+    """Wrapper that delays the start of an LLM call to stagger concurrent launches."""
+    if delay > 0.0:
+        await asyncio.sleep(delay)
+    return await async_query_llm(model_id, prompt_text, system=system, role=role)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -75,14 +93,24 @@ async def agent1_llm_query_all_node(state: dict) -> dict:
             f"— firing {len(combos)} parallel calls"
         )
 
-        coros   = [
-            async_query_llm(model_id, prompt_text, system=system, role="query")
-            for model_id, _ in combos
+        coros = [
+            _delayed_query(
+                delay=idx * _STAGGER_S,
+                model_id=model_id,
+                prompt_text=prompt_text,
+                system=system,
+                role="query",
+            )
+            for idx, (model_id, _) in enumerate(combos)
         ]
         results = await asyncio.gather(*coros, return_exceptions=True)
 
+        # ── inter-prompt breathing room ──────────────────────────────────────
+        if i < len(prompts) - 1:   # no sleep after the last prompt
+            await asyncio.sleep(_INTER_PROMPT_DELAY_S)
+
         for (model_id, run_idx), result in zip(combos, results):
-            if isinstance(result, Exception):
+            if isinstance(result, BaseException):
                 logger.error(
                     f"[LLMQueryAll] {prompt_id}/{model_id}/run_{run_idx}: {result}"
                 )

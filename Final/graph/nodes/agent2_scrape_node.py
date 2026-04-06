@@ -20,7 +20,6 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))  # Final/ is root
 import asyncio
 import concurrent.futures
 from loguru import logger
-from agents.agent2_react import run_agent2_react
 
 
 def agent2_scrape_node(state: dict) -> dict:
@@ -40,6 +39,7 @@ def agent2_scrape_node(state: dict) -> dict:
     logger.info(f"[Agent2ScrapeNode] Scraping brand: '{brand}' in '{location}'")
 
     try:
+        from agents.agent2_react import run_agent2_react  # lazy — avoids langchain_groq at import time
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
             future = pool.submit(asyncio.run, run_agent2_react([brand]))
             results = future.result(timeout=180)
@@ -51,9 +51,8 @@ def agent2_scrape_node(state: dict) -> dict:
 
     except concurrent.futures.TimeoutError:
         logger.warning(f"[Agent2ScrapeNode] Timeout scraping '{brand}' after 180 s — skipping")
-        return {"profiles": []}
+        return {"profiles": [], "errors": [f"Agent2 scrape timed out for '{brand}'"]}
 
     except Exception as exc:
         logger.error(f"[Agent2ScrapeNode] Failed scraping '{brand}': {exc}")
-        profile = {"brand": brand, "status": "error", "error": str(exc)}
-        return {"profiles": [profile], "errors": [f"Agent2 scrape failed for '{brand}': {exc}"]}
+        return {"profiles": [], "errors": [f"Agent2 scrape failed for '{brand}': {exc}"]}

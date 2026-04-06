@@ -86,17 +86,22 @@ OPENROUTER_MODELS = (
 )
 
 # ── Concurrency controls ──────────────────────────────────────────────────────
-MAX_CONCURRENT_LLM    = int(os.environ.get("MAX_CONCURRENT_LLM",    "5"))
+MAX_CONCURRENT_LLM    = int(os.environ.get("MAX_CONCURRENT_LLM",    "3"))
 MAX_CONCURRENT_BRANDS = int(os.environ.get("MAX_CONCURRENT_BRANDS", "3"))
-GROQ_RPM              = int(os.environ.get("GROQ_RPM",              "800"))
+GROQ_RPM              = int(os.environ.get("GROQ_RPM",              "1000"))
 
 # ── Agent defaults ────────────────────────────────────────────────────────────
-N_RUNS               = int(os.environ.get("N_RUNS",               "2"))
-N_INTENTS            = int(os.environ.get("N_INTENTS",            "6"))
+N_RUNS               = int(os.environ.get("N_RUNS",               "1"))
+N_INTENTS            = int(os.environ.get("N_INTENTS",            "4"))
 N_VARIANTS           = int(os.environ.get("N_VARIANTS",           "2"))
 LANGUAGES            = os.environ.get("LANGUAGES", "en,fr,ar").split(",")
-MAX_REFLECTION_LOOPS = int(os.environ.get("MAX_REFLECTION_LOOPS", "2"))
+MAX_REFLECTION_LOOPS = int(os.environ.get("MAX_REFLECTION_LOOPS", "1"))
 MAX_RETRIES          = int(os.environ.get("MAX_RETRIES",          "3"))
+
+# Inter-prompt delay: breathing room between prompt batches in agent1_llm_query_node.py
+INTER_PROMPT_DELAY_S = float(os.environ.get("INTER_PROMPT_DELAY_S", "0.6"))
+# Per-minute token cap: 93% of 300K Groq TPM limit (conservative headroom)
+GROQ_TPM_LIMIT = int(os.environ.get("GROQ_TPM_LIMIT", "280000"))
 
 # ── Output paths ──────────────────────────────────────────────────────────────
 OUTPUT_DIR       = os.environ.get("OUTPUT_DIR",       "geo_output")

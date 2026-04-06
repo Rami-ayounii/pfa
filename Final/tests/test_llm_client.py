@@ -233,9 +233,13 @@ class TestTokenBucket:
 def test_model_constants_env_override(monkeypatch):
     monkeypatch.setenv("MODEL_FAST", "custom-fast-model")
     import importlib
+    import config
     import core.llm_client as m
+    # Must reload config first so the new env var is picked up, then llm_client
+    importlib.reload(config)
     importlib.reload(m)
     assert m.MODEL_FAST == "custom-fast-model"
     # Clean up: reload without the env var
     monkeypatch.delenv("MODEL_FAST", raising=False)
+    importlib.reload(config)
     importlib.reload(m)

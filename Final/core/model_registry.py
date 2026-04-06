@@ -52,10 +52,16 @@ class _ModelState:
         self.id            = model_id
         self.tpd_exhausted = False     # True = skip for rest of session
         self.tpm_retry_at  = 0.0       # epoch time when TPM resets
+        self.recent_calls  = 0         # increments on mark_tpm, resets when tpm clears
 
     @property
     def available(self) -> bool:
-        return not self.tpd_exhausted and self.tpm_retry_at <= time.time()
+        if self.tpd_exhausted:
+            return False
+        if time.time() >= self.tpm_retry_at:
+            self.recent_calls = 0   # TPM window expired, reset counter
+            return True
+        return False
 
     def mark_tpd_exhausted(self):
         self.tpd_exhausted = True
@@ -63,6 +69,7 @@ class _ModelState:
 
     def mark_tpm(self, retry_after_seconds: float):
         self.tpm_retry_at = time.time() + retry_after_seconds
+        self.recent_calls += 1
         print(f"[registry] {self.id}: TPM limit — available again in {retry_after_seconds:.0f}s")
 
 
@@ -149,9 +156,14 @@ class ModelRegistry:
                     f"  TPM blocked     : {tpm_blocked}"
                 )
 
-            # Sort by tier (lower = better), then alphabetically for stability
-            available.sort(key=lambda s: (_tier(s.id), s.id))
+            # Sort by tier (lower = better), then by recent_calls (fewer = preferred),
+            # then alphabetically for stability
+            available.sort(key=lambda s: (_tier(s.id), s.recent_calls, s.id))
             chosen = available[0].id
+            avail = sum(1 for s in self._states.values() if s.available)
+            if avail < 2:
+                from loguru import logger
+                logger.warning(f"[Registry] Only {avail} model(s) available — rate limits imminent!")
             if preferred and chosen != preferred:
                 print(f"[registry] Selected model: {chosen} (preferred '{preferred}' unavailable)")
             return chosen
@@ -167,6 +179,12 @@ class ModelRegistry:
         with self._lock:
             if model_id in self._states:
                 self._states[model_id].mark_tpm(retry_after_seconds)
+
+    def available_count(self) -> int:
+        """Returns number of models currently available (not TPD-exhausted, not TPM-blocked)."""
+        self._ensure_loaded()
+        with self._lock:
+            return sum(1 for s in self._states.values() if s.available)
 
     def status(self) -> dict:
         """Return a summary of model availability (useful for debugging)."""

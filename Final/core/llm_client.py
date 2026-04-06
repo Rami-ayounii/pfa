@@ -27,18 +27,19 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))  # Final/ is root
 
 import os, re, json, time, hashlib, asyncio, requests, random
+from collections import deque as _deque
 from groq import Groq
 from loguru import logger
 
 from config import (
     GROQ_API_KEY, MISTRAL_API_KEY, OPENROUTER_API_KEY,
-    MAX_CONCURRENT_LLM, GROQ_RPM,
+    MAX_CONCURRENT_LLM, GROQ_RPM, GROQ_TPM_LIMIT,
     MODEL_FAST, MODEL_STRONG, MODEL_EXTRACTOR,
     MODEL_COMPOUND, MODEL_GPTOSS, MODEL_QWEN, MODEL_LLAMA4,
     MODEL_ANALYST, MODEL_KIMI,
     OPENROUTER_MODELS,
 )
-from core.model_registry import registry
+from core.model_registry import registry  # type: ignore[import]
 
 # ── OpenRouter fallback map ───────────────────────────────────────────────────
 GROQ_TO_OPENROUTER_FALLBACK: dict[str, str] = {
@@ -62,6 +63,31 @@ def _get_semaphore() -> asyncio.Semaphore:
     if _llm_semaphore is None:
         _llm_semaphore = asyncio.Semaphore(MAX_CONCURRENT_LLM)
     return _llm_semaphore
+
+# ── Per-minute TPM (tokens-per-minute) gate ───────────────────────────────────
+_tpm_window: _deque = _deque()  # (monotonic_timestamp, tokens) pairs
+_tpm_lock: asyncio.Lock | None = None
+
+async def _wait_for_tpm_headroom(tokens_needed: int = 800) -> None:
+    """Block if adding tokens_needed would exceed GROQ_TPM_LIMIT in current minute."""
+    global _tpm_lock
+    if _tpm_lock is None:
+        _tpm_lock = asyncio.Lock()
+    async with _tpm_lock:
+        now = time.monotonic()
+        while _tpm_window and now - _tpm_window[0][0] > 60.0:
+            _tpm_window.popleft()
+        used = sum(t for _, t in _tpm_window)
+        wait = 0.0
+        if used + tokens_needed > GROQ_TPM_LIMIT and _tpm_window:
+            wait = (_tpm_window[0][0] + 61.0) - now
+    # Sleep outside the lock so other callers can proceed concurrently.
+    if wait > 0:
+        logger.info(f"[TPM gate] {used:,}/{GROQ_TPM_LIMIT:,} tokens/min — pausing {wait:.1f}s")
+        await asyncio.sleep(wait)
+
+def _record_tpm(tokens: int) -> None:
+    _tpm_window.append((time.monotonic(), tokens))
 
 # ── Token-bucket rate limiter ─────────────────────────────────────────────────
 class _TokenBucket:
@@ -192,7 +218,7 @@ def query_llm(model: str, prompt: str, system: str = "",
             else:
                 wait_base = _parse_wait(err) or (2 ** attempt)
                 registry.mark_tpm(model, wait_base)
-                wait = wait_base * random.uniform(0.7, 1.3)
+                wait = wait_base * random.uniform(0.5, 1.8)
                 logger.debug(f"Waiting {wait:.1f}s (base={wait_base:.0f}s, jittered) …")
                 time.sleep(wait + 1)
 
@@ -215,11 +241,13 @@ async def async_query_llm(model: str, prompt: str, system: str = "",
 
     1. Token-bucket pre-throttle  — enforces GROQ_RPM before entering loop.
     2. Semaphore per-attempt      — MAX_CONCURRENT_LLM slots, released before sleep.
-    3. Jittered exponential backoff — wait *= random.uniform(0.7, 1.3).
+    3. Jittered backoff — wait *= random.uniform(0.5, 1.8); unknown errors get 8–20 s base.
 
     Registry integration: model is re-selected after acquiring the semaphore,
     so a temporarily rate-limited model is swapped out automatically.
     """
+    await _wait_for_tpm_headroom()
+
     from groq import AsyncGroq
 
     _base_url    = os.environ.get("GROQ_BASE_URL", "")
@@ -235,7 +263,10 @@ async def async_query_llm(model: str, prompt: str, system: str = "",
 
     for attempt in range(1, retries + 1):
         async with _get_semaphore():
-            model = registry.select(preferred=model)
+            _requested = model
+            model = registry.select(preferred=_requested)
+            if _requested and model != _requested:
+                await asyncio.sleep(random.uniform(0.0, 0.35))
             _is_compound = "compound" in model.lower()
             _aclient = AsyncGroq(api_key=GROQ_API_KEY, base_url=_base_url) if _base_url \
                 else AsyncGroq(api_key=GROQ_API_KEY)
@@ -251,6 +282,7 @@ async def async_query_llm(model: str, prompt: str, system: str = "",
                         "total_tokens":      resp.usage.total_tokens,
                     }
                     _track(_result)
+                    _record_tpm(_result.get("total_tokens", 0))
                     _succeeded = True
                 except Exception as e:
                     err = str(e)
@@ -259,12 +291,12 @@ async def async_query_llm(model: str, prompt: str, system: str = "",
                         logger.error(f"[async] Fatal error for model={model} — not retrying.")
                         _fatal = True
                     else:
-                        wait_base = _parse_wait(err) or (2 ** attempt)
+                        wait_base = _parse_wait(err) or random.uniform(8.0, 20.0)
                         if _is_daily_limit(err):
                             registry.mark_tpd_exhausted(model)
                         else:
                             registry.mark_tpm(model, wait_base)
-                        _wait = wait_base * random.uniform(0.7, 1.3)
+                        _wait = wait_base * random.uniform(0.5, 1.8)
                         logger.debug(f"[async] Waiting {_wait:.1f}s "
                                      f"(base={wait_base:.0f}s, jittered) …")
 
@@ -289,6 +321,7 @@ async def async_query_llm(model: str, prompt: str, system: str = "",
     logger.error(f"[async] All retries exhausted for model={model}. Queueing for retry.")
     await _get_retry_queue().put({"model": model, "prompt": prompt,
                                    "system": system, "role": role})
+    asyncio.ensure_future(drain_retry_queue())
     return _empty_result()
 
 
