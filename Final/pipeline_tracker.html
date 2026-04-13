@@ -1,0 +1,1221 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>GEO Pipeline — Run Tracker</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;500;600;700;800&family=DM+Mono:ital,wght@0,300;0,400;0,500;1,400&display=swap" rel="stylesheet">
+
+<style>
+:root {
+  --bg:          #0d0d0d;
+  --surface:     #141414;
+  --surface-2:   #1c1c1c;
+  --border:      #252525;
+  --border-mid:  #333333;
+
+  --gold:        #c9a84c;
+  --gold-dim:    #7a6228;
+  --gold-glow:   rgba(201,168,76,0.12);
+
+  --violet:      #8b7fce;
+  --violet-dim:  #4a436e;
+  --violet-glow: rgba(139,127,206,0.14);
+
+  --muted:       #3a3a3a;
+  --muted-text:  #555555;
+  --dim-text:    #888888;
+  --body-text:   #b0b0b0;
+  --heading:     #e8e8e8;
+
+  --spine-x:     64px;
+  --card-gap:    20px;
+}
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+html { background: var(--bg); color: var(--body-text); font-family: 'DM Mono', monospace; font-size: 13px; line-height: 1.6; }
+
+body {
+  min-height: 100vh;
+  overflow-x: hidden;
+}
+
+/* ── HEADER ── */
+.header {
+  position: sticky;
+  top: 0;
+  z-index: 100;
+  background: var(--bg);
+  border-bottom: 1px solid var(--border);
+  padding: 0 40px;
+  display: flex;
+  align-items: center;
+  gap: 32px;
+  height: 56px;
+}
+
+.header-logo {
+  font-family: 'Syne', sans-serif;
+  font-weight: 800;
+  font-size: 15px;
+  letter-spacing: 0.12em;
+  color: var(--heading);
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+.header-logo span { color: var(--gold); }
+
+.header-sep { width: 1px; height: 24px; background: var(--border-mid); flex-shrink: 0; }
+
+.header-query {
+  font-family: 'DM Mono', monospace;
+  font-size: 11px;
+  color: var(--dim-text);
+  letter-spacing: 0.04em;
+}
+.header-query strong { color: var(--body-text); font-weight: 400; }
+
+.header-right {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 24px;
+}
+
+.run-pill {
+  font-family: 'DM Mono', monospace;
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  padding: 4px 10px;
+  border: 1px solid var(--border-mid);
+  color: var(--dim-text);
+  text-transform: uppercase;
+}
+
+.live-dot {
+  width: 6px; height: 6px;
+  border-radius: 50%;
+  background: var(--violet);
+  animation: pulse-dot 1.8s ease-in-out infinite;
+}
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50%       { opacity: 0.4; transform: scale(0.7); }
+}
+
+/* ── PROGRESS BAR ── */
+.progress-bar-wrap {
+  height: 2px;
+  background: var(--border);
+  position: relative;
+  overflow: hidden;
+}
+.progress-bar-fill {
+  height: 100%;
+  background: var(--gold);
+  width: var(--pct, 0%);
+  transition: width 0.6s ease;
+  position: relative;
+}
+.progress-bar-fill::after {
+  content: '';
+  position: absolute;
+  right: 0; top: 0; bottom: 0;
+  width: 40px;
+  background: linear-gradient(to right, transparent, var(--gold));
+  animation: shimmer 1.4s ease-in-out infinite;
+}
+@keyframes shimmer {
+  0%,100% { opacity: 0.4; } 50% { opacity: 1; }
+}
+
+/* ── LAYOUT ── */
+.layout {
+  display: grid;
+  grid-template-columns: 280px 1fr;
+  min-height: calc(100vh - 58px);
+}
+
+/* ── SIDEBAR ── */
+.sidebar {
+  border-right: 1px solid var(--border);
+  padding: 32px 24px;
+  position: sticky;
+  top: 58px;
+  height: calc(100vh - 58px);
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 28px;
+}
+
+.sidebar-section-label {
+  font-family: 'DM Mono', monospace;
+  font-size: 9px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--muted-text);
+  margin-bottom: 12px;
+}
+
+.stat-block {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.stat-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
+}
+.stat-key {
+  font-size: 10px;
+  color: var(--muted-text);
+  letter-spacing: 0.06em;
+  white-space: nowrap;
+}
+.stat-val {
+  font-size: 11px;
+  color: var(--body-text);
+  text-align: right;
+}
+.stat-val.gold { color: var(--gold); }
+.stat-val.violet { color: var(--violet); }
+
+.legend {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.legend-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 10px;
+  color: var(--dim-text);
+  letter-spacing: 0.05em;
+}
+.legend-node {
+  width: 10px; height: 10px;
+  flex-shrink: 0;
+}
+.legend-node.done {
+  background: var(--gold);
+}
+.legend-node.active {
+  background: transparent;
+  border: 2px solid var(--violet);
+  border-radius: 50%;
+  position: relative;
+}
+.legend-node.active::after {
+  content: '';
+  position: absolute;
+  inset: 1px;
+  border-radius: 50%;
+  background: var(--violet);
+  animation: pulse-fill 1.4s ease-in-out infinite;
+}
+@keyframes pulse-fill { 0%,100% { opacity: 0.6; } 50% { opacity: 1; } }
+.legend-node.pending {
+  background: transparent;
+  border: 1.5px solid var(--muted);
+}
+
+.sidebar-divider {
+  height: 1px;
+  background: var(--border);
+}
+
+/* ── MAIN TIMELINE ── */
+.timeline-wrap {
+  padding: 40px 48px 80px;
+  position: relative;
+}
+
+.timeline-header {
+  margin-bottom: 40px;
+}
+.timeline-title {
+  font-family: 'Syne', sans-serif;
+  font-weight: 700;
+  font-size: 22px;
+  color: var(--heading);
+  letter-spacing: -0.01em;
+  margin-bottom: 6px;
+}
+.timeline-subtitle {
+  font-size: 11px;
+  color: var(--muted-text);
+  letter-spacing: 0.06em;
+}
+
+/* The vertical spine */
+.timeline {
+  position: relative;
+  padding-left: calc(var(--spine-x) + 24px);
+}
+.timeline::before {
+  content: '';
+  position: absolute;
+  left: var(--spine-x);
+  top: 8px;
+  bottom: 8px;
+  width: 1.5px;
+  background: linear-gradient(
+    to bottom,
+    transparent,
+    var(--border-mid) 4%,
+    var(--border-mid) 96%,
+    transparent
+  );
+}
+
+/* ── STAGE ITEM ── */
+.stage {
+  position: relative;
+  margin-bottom: var(--card-gap);
+  display: flex;
+  align-items: flex-start;
+  gap: 20px;
+  cursor: pointer;
+  --status-color: var(--muted);
+}
+
+.stage[data-status="done"]    { --status-color: var(--gold); }
+.stage[data-status="active"]  { --status-color: var(--violet); }
+.stage[data-status="pending"] { --status-color: var(--muted); }
+
+/* Node on spine */
+.stage-node {
+  position: absolute;
+  left: calc(var(--spine-x) * -1 - 24px + var(--spine-x));
+  top: 18px;
+  transform: translateX(-50%);
+  z-index: 2;
+}
+
+.node-marker {
+  width: 10px; height: 10px;
+  position: relative;
+  display: flex; align-items: center; justify-content: center;
+}
+
+.stage[data-status="done"] .node-marker {
+  background: var(--gold);
+  outline: 3px solid var(--bg);
+  box-shadow: 0 0 0 1px var(--gold-dim);
+}
+
+.stage[data-status="active"] .node-marker {
+  border-radius: 50%;
+  border: 2px solid var(--violet);
+  background: transparent;
+  box-shadow: 0 0 0 4px var(--violet-glow);
+  animation: node-pulse 1.6s ease-in-out infinite;
+}
+.stage[data-status="active"] .node-marker::after {
+  content: '';
+  position: absolute;
+  width: 4px; height: 4px;
+  border-radius: 50%;
+  background: var(--violet);
+  animation: pulse-fill 1.6s ease-in-out infinite;
+}
+@keyframes node-pulse {
+  0%,100% { box-shadow: 0 0 0 4px var(--violet-glow); }
+  50%      { box-shadow: 0 0 0 8px rgba(139,127,206,0.06); }
+}
+
+.stage[data-status="pending"] .node-marker {
+  border: 1.5px solid var(--muted);
+  background: var(--bg);
+}
+
+/* Card */
+.stage-card {
+  flex: 1;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-left: 2px solid var(--status-color);
+  padding: 16px 20px 14px;
+  position: relative;
+  transition: border-color 0.25s, background 0.2s;
+}
+
+.stage[data-status="done"]    .stage-card { border-left-color: var(--gold); }
+.stage[data-status="active"]  .stage-card {
+  border-left-color: var(--violet);
+  background: color-mix(in srgb, var(--surface) 95%, var(--violet) 5%);
+}
+.stage[data-status="pending"] .stage-card { border-left-color: var(--muted); }
+
+.stage-card:hover {
+  border-color: var(--border-mid);
+  border-left-color: var(--status-color);
+}
+
+.card-top {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.card-left {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.stage-name {
+  font-family: 'Syne', sans-serif;
+  font-weight: 600;
+  font-size: 13px;
+  color: var(--heading);
+  letter-spacing: 0.01em;
+}
+
+.stage[data-status="done"]   .stage-name { color: var(--gold); }
+.stage[data-status="active"] .stage-name { color: var(--violet); }
+
+.stage-desc {
+  font-size: 11px;
+  color: var(--dim-text);
+  letter-spacing: 0.03em;
+}
+
+.card-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.status-badge {
+  font-family: 'DM Mono', monospace;
+  font-size: 9px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  padding: 3px 7px;
+  border: 1px solid;
+}
+.status-badge.done    { color: var(--gold);   border-color: var(--gold-dim); }
+.status-badge.active  { color: var(--violet); border-color: var(--violet-dim);
+                        animation: badge-blink 2s ease-in-out infinite; }
+.status-badge.pending { color: var(--muted-text); border-color: var(--muted); }
+
+@keyframes badge-blink {
+  0%,100% { opacity: 1; } 60% { opacity: 0.65; }
+}
+
+.agent-tag {
+  font-size: 9px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--muted-text);
+  border: 1px solid var(--border);
+  padding: 3px 6px;
+}
+
+/* Metadata row */
+.card-meta {
+  display: flex;
+  gap: 20px;
+  flex-wrap: wrap;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+  margin-top: 10px;
+}
+
+.meta-item {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.meta-key {
+  font-size: 9px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--muted-text);
+}
+.meta-val {
+  font-size: 11px;
+  color: var(--body-text);
+  font-family: 'DM Mono', monospace;
+}
+.meta-val.highlight { color: var(--gold); }
+.meta-val.active    { color: var(--violet); }
+.meta-val.dim       { color: var(--muted-text); font-style: italic; }
+
+/* Parallel indicator */
+.parallel-tag {
+  font-size: 9px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--muted-text);
+  padding: 2px 6px;
+  border: 1px dashed var(--muted);
+}
+.stage[data-status="active"]  .parallel-tag { color: var(--violet); border-color: var(--violet-dim); }
+.stage[data-status="done"]    .parallel-tag { color: var(--gold-dim); border-color: var(--gold-dim); }
+
+/* Active scan line */
+.scan-line {
+  position: absolute;
+  bottom: 0; left: 0; right: 0;
+  height: 1px;
+  background: var(--violet);
+  animation: scan 2.2s ease-in-out infinite;
+  transform-origin: left;
+}
+@keyframes scan {
+  0%   { transform: scaleX(0); opacity: 0; }
+  20%  { opacity: 0.8; }
+  80%  { opacity: 0.8; }
+  100% { transform: scaleX(1); opacity: 0; }
+}
+
+/* Stage index label (left of spine) */
+.stage-index {
+  position: absolute;
+  left: calc(var(--spine-x) * -1 - 24px);
+  top: 18px;
+  transform: translateX(calc(-100% - 14px));
+  font-size: 10px;
+  color: var(--muted-text);
+  letter-spacing: 0.04em;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.stage[data-status="done"]   .stage-index { color: var(--gold-dim); }
+.stage[data-status="active"] .stage-index { color: var(--violet-dim); }
+
+/* Duration flyout on done items */
+.done-check {
+  width: 14px; height: 14px;
+  flex-shrink: 0;
+  color: var(--gold);
+  display: none;
+}
+.stage[data-status="done"] .done-check { display: block; }
+
+/* ── SECTION DIVIDERS ── */
+.phase-label {
+  position: absolute;
+  left: calc(var(--spine-x) * -1 - 24px);
+  transform: translateX(calc(-100% - 14px));
+  font-size: 9px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--muted-text);
+  white-space: nowrap;
+  writing-mode: vertical-rl;
+  text-orientation: mixed;
+  transform-origin: right center;
+  background: var(--bg);
+  padding: 6px 0;
+}
+
+/* ── TOOLTIP / EXPANDED ── */
+.stage-card.expanded .card-meta { display: flex; }
+
+/* ── BOTTOM TOKEN SUMMARY ── */
+.token-summary {
+  margin-top: 40px;
+  padding: 20px 24px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  display: flex;
+  gap: 32px;
+  flex-wrap: wrap;
+}
+.token-summary-label {
+  font-size: 9px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--muted-text);
+  margin-bottom: 4px;
+}
+.token-summary-val {
+  font-size: 17px;
+  font-family: 'Syne', sans-serif;
+  font-weight: 700;
+  color: var(--heading);
+}
+.token-summary-val.gold { color: var(--gold); }
+
+/* ── SCROLLBAR ── */
+::-webkit-scrollbar { width: 4px; height: 4px; }
+::-webkit-scrollbar-track { background: var(--bg); }
+::-webkit-scrollbar-thumb { background: var(--border-mid); }
+
+/* ── RESPONSIVE ── */
+@media (max-width: 780px) {
+  .layout { grid-template-columns: 1fr; }
+  .sidebar { position: static; height: auto; border-right: none; border-bottom: 1px solid var(--border); }
+  .timeline-wrap { padding: 24px 20px; }
+}
+</style>
+</head>
+<body>
+
+<!-- HEADER -->
+<header class="header">
+  <div class="header-logo">GEO<span>/</span>PIPELINE</div>
+  <div class="header-sep"></div>
+  <div class="header-query">
+    query <strong id="hdr-query">—</strong>
+    &nbsp;·&nbsp;
+    domain <strong id="hdr-domain">—</strong>
+    &nbsp;·&nbsp;
+    location <strong id="hdr-location">—</strong>
+  </div>
+  <div class="header-right">
+    <div class="run-pill" id="hdr-run">RUN —</div>
+    <div class="live-dot" id="live-indicator" title="Pipeline running"></div>
+  </div>
+</header>
+
+<!-- PROGRESS BAR -->
+<div class="progress-bar-wrap">
+  <div class="progress-bar-fill" id="progress-fill" style="--pct: 0%"></div>
+</div>
+
+<!-- LAYOUT -->
+<div class="layout">
+
+  <!-- SIDEBAR -->
+  <aside class="sidebar">
+    <div>
+      <div class="sidebar-section-label">Run Status</div>
+      <div class="stat-block">
+        <div class="stat-row"><span class="stat-key">started</span>     <span class="stat-val" id="sb-started">—</span></div>
+        <div class="stat-row"><span class="stat-key">elapsed</span>     <span class="stat-val" id="sb-elapsed">—</span></div>
+        <div class="stat-row"><span class="stat-key">stage</span>       <span class="stat-val violet" id="sb-current">—</span></div>
+        <div class="stat-row"><span class="stat-key">progress</span>    <span class="stat-val gold" id="sb-pct">—</span></div>
+      </div>
+    </div>
+
+    <div class="sidebar-divider"></div>
+
+    <div>
+      <div class="sidebar-section-label">Token Usage</div>
+      <div class="stat-block">
+        <div class="stat-row"><span class="stat-key">prompt</span>      <span class="stat-val" id="sb-prompt-tok">—</span></div>
+        <div class="stat-row"><span class="stat-key">completion</span>  <span class="stat-val" id="sb-comp-tok">—</span></div>
+        <div class="stat-row"><span class="stat-key">total</span>       <span class="stat-val gold" id="sb-total-tok">—</span></div>
+      </div>
+    </div>
+
+    <div class="sidebar-divider"></div>
+
+    <div>
+      <div class="sidebar-section-label">Models Active</div>
+      <div class="stat-block" id="sb-models">
+        <!-- injected -->
+      </div>
+    </div>
+
+    <div class="sidebar-divider"></div>
+
+    <div>
+      <div class="sidebar-section-label">Legend</div>
+      <div class="legend">
+        <div class="legend-item"><div class="legend-node done"></div>Completed</div>
+        <div class="legend-item"><div class="legend-node active"></div>Running</div>
+        <div class="legend-item"><div class="legend-node pending"></div>Pending</div>
+      </div>
+    </div>
+
+    <div class="sidebar-divider"></div>
+
+    <div>
+      <div class="sidebar-section-label">Controls</div>
+      <div class="stat-block" style="gap:8px">
+        <button onclick="advanceStage()" style="background:var(--surface-2);border:1px solid var(--border-mid);color:var(--body-text);font-family:'DM Mono',monospace;font-size:10px;letter-spacing:.08em;padding:7px 14px;cursor:pointer;text-align:left;width:100%">
+          ▶ ADVANCE STAGE
+        </button>
+        <button onclick="resetPipeline()" style="background:none;border:1px solid var(--border);color:var(--muted-text);font-family:'DM Mono',monospace;font-size:10px;letter-spacing:.08em;padding:7px 14px;cursor:pointer;text-align:left;width:100%">
+          ↺ RESET
+        </button>
+      </div>
+    </div>
+  </aside>
+
+  <!-- MAIN TIMELINE -->
+  <main class="timeline-wrap">
+    <div class="timeline-header">
+      <div class="timeline-title">Pipeline Execution Trace</div>
+      <div class="timeline-subtitle">Click any stage card to expand · Use ADVANCE to step through states</div>
+    </div>
+
+    <div class="timeline" id="timeline">
+      <!-- stages injected by JS -->
+    </div>
+
+    <div class="token-summary" id="token-summary-block">
+      <div>
+        <div class="token-summary-label">Stages Complete</div>
+        <div class="token-summary-val gold" id="ts-complete">0 / 11</div>
+      </div>
+      <div>
+        <div class="token-summary-label">Total Tokens</div>
+        <div class="token-summary-val" id="ts-tokens">—</div>
+      </div>
+      <div>
+        <div class="token-summary-label">LLM Calls</div>
+        <div class="token-summary-val" id="ts-calls">—</div>
+      </div>
+      <div>
+        <div class="token-summary-label">Entities Found</div>
+        <div class="token-summary-val" id="ts-entities">—</div>
+      </div>
+      <div>
+        <div class="token-summary-label">Brands Scraped</div>
+        <div class="token-summary-val" id="ts-brands">—</div>
+      </div>
+    </div>
+  </main>
+</div>
+
+<script>
+// ── Status server URL ─────────────────────────────────────────────────────────
+// When opened via Live Server (port 5500) the relative /api/status hits Live
+// Server instead of status_server.py.  Use the absolute URL so the fetch always
+// reaches the right process regardless of how this HTML is served.
+// Change the port below if you started status_server.py on a different port.
+const STATUS_API_URL = 'http://localhost:7654/api/status';
+
+// ── Pipeline data ─────────────────────────────────────────────────────────────
+const PIPELINE_META = {
+  query:    "Restaurants in Tunis",
+  domain:   "Tunisian restaurants",
+  location: "Tunisia",
+  run_id:   "geo-20260407-001",
+  models:   ["llama-3.3-70b-versatile", "llama-4-scout-17b", "qwen3-32b", "gpt-oss-20b"],
+};
+
+const STAGES = [
+  {
+    id: "parse_query",
+    name: "Parse Query",
+    desc: "NL → { domain, location }",
+    agent: null,
+    parallel: false,
+    meta: {
+      duration: "0.8s",
+      tokens:   "142",
+      model:    "llama-3.1-8b-instant",
+      calls:    "1",
+    },
+    summary: { tokens: 142, calls: 1, entities: 0, brands: 0 },
+  },
+  {
+    id: "agent0",
+    name: "Prompt Generation",
+    desc: "Intent × language × variant synthesis + self-reflection",
+    agent: "Agent 0",
+    parallel: false,
+    meta: {
+      duration: "4.2s",
+      tokens:   "3,841",
+      model:    "llama-3.3-70b-versatile",
+      calls:    "6",
+    },
+    summary: { tokens: 3841, calls: 6, entities: 0, brands: 0 },
+  },
+  {
+    id: "agent1_load",
+    name: "Load Prompts",
+    desc: "DataFrame validation · column check · prompts list prep",
+    agent: "Agent 1",
+    parallel: false,
+    meta: {
+      duration: "0.06s",
+      tokens:   "—",
+      model:    "—",
+      calls:    "—",
+    },
+    summary: { tokens: 0, calls: 0, entities: 0, brands: 0 },
+  },
+  {
+    id: "agent1_query",
+    name: "LLM Fan-Out",
+    desc: "4 models × 6 prompts × 1 run — async parallel dispatch",
+    agent: "Agent 1",
+    parallel: true,
+    meta: {
+      duration: "18.4s",
+      tokens:   "24,680",
+      model:    "4 models",
+      calls:    "24",
+    },
+    summary: { tokens: 24680, calls: 24, entities: 0, brands: 0 },
+  },
+  {
+    id: "agent1_aggregate",
+    name: "Aggregate Responses",
+    desc: "Fan-in merge of raw_responses via LangGraph operator.add",
+    agent: "Agent 1",
+    parallel: false,
+    meta: {
+      duration: "0.1s",
+      tokens:   "—",
+      model:    "—",
+      calls:    "—",
+    },
+    summary: { tokens: 0, calls: 0, entities: 0, brands: 0 },
+  },
+  {
+    id: "agent1_extract",
+    name: "Extract Entities",
+    desc: "JSON parsing · entity identification · raw GEO scoring",
+    agent: "Agent 1",
+    parallel: false,
+    meta: {
+      duration: "2.1s",
+      tokens:   "4,210",
+      model:    "gemma2-9b-it",
+      calls:    "6",
+    },
+    summary: { tokens: 4210, calls: 6, entities: 47, brands: 0 },
+  },
+  {
+    id: "agent1_enrich",
+    name: "Enrich",
+    desc: "GEO feature enrichment · mention rate · ranking position",
+    agent: "Agent 1",
+    parallel: false,
+    meta: {
+      duration: "0.3s",
+      tokens:   "—",
+      model:    "—",
+      calls:    "—",
+    },
+    summary: { tokens: 0, calls: 0, entities: 47, brands: 0 },
+  },
+  {
+    id: "agent1_clean",
+    name: "Clean & Dedup",
+    desc: "Phase A–D: normalise · fuzzy cluster · LLM arbitration · self-reflect",
+    agent: "Agent 1",
+    parallel: false,
+    meta: {
+      duration: "6.8s",
+      tokens:   "8,940",
+      model:    "llama-3.3-70b-versatile",
+      calls:    "4",
+    },
+    summary: { tokens: 8940, calls: 4, entities: 31, brands: 0 },
+  },
+  {
+    id: "agent1_metrics",
+    name: "GEO Metrics",
+    desc: "Visibility scoring · cross-model rate · top-1 rate · stability",
+    agent: "Agent 1",
+    parallel: false,
+    meta: {
+      duration: "0.4s",
+      tokens:   "—",
+      model:    "—",
+      calls:    "—",
+    },
+    summary: { tokens: 0, calls: 0, entities: 31, brands: 0 },
+  },
+  {
+    id: "agent2_scrape",
+    name: "Social Scrape Fan-Out",
+    desc: "SerpAPI → OSM → Apify · parallel brand scraping · hallucination check",
+    agent: "Agent 2",
+    parallel: true,
+    meta: {
+      duration: "42.3s",
+      tokens:   "1,820",
+      model:    "llama-3.1-8b-instant",
+      calls:    "19",
+    },
+    summary: { tokens: 1820, calls: 19, entities: 31, brands: 19 },
+  },
+  {
+    id: "export",
+    name: "Export",
+    desc: "entity_features_global.csv · social_profiles.csv · pipeline_summary.json",
+    agent: null,
+    parallel: false,
+    meta: {
+      duration: "0.2s",
+      tokens:   "—",
+      model:    "—",
+      calls:    "—",
+    },
+    summary: { tokens: 0, calls: 0, entities: 31, brands: 19 },
+  },
+];
+
+// ── State ─────────────────────────────────────────────────────────────────────
+let currentActive = 0;     // manual mode: index of active stage
+let startTime     = Date.now();
+let elapsedInterval = null;
+let liveMode      = false; // true = server connected, stage statuses come from API
+let liveStatuses  = {};    // { stage_id: 'done'|'active'|'error'|'pending' }
+let liveMeta      = {};    // { stage_id: { duration_s, entities, ... } }
+let liveTokens    = null;  // pipeline_summary.token_usage when available
+let liveSummary   = null;  // full pipeline_summary when available
+let pollTimer     = null;
+
+const STAGE_ID_ORDER = STAGES.map(s => s.id);
+
+function getStatus(idx) {
+  const id = STAGES[idx].id;
+  if (liveMode) {
+    return liveStatuses[id] || 'pending';
+  }
+  if (idx < currentActive) return 'done';
+  if (idx === currentActive) return 'active';
+  return 'pending';
+}
+
+function getStageMeta(idx) {
+  const s  = STAGES[idx];
+  const id = s.id;
+  if (liveMode && liveMeta[id]) {
+    const m   = liveMeta[id];
+    const dur = m.duration_s != null ? m.duration_s.toFixed(1) + 's' : s.meta.duration;
+    const base = { ...s.meta, duration: dur };
+
+    // LLM fan-out: show per-prompt progress
+    if (id === 'agent1_query' && m.prompts_total != null) {
+      const done  = m.prompts_done  ?? 0;
+      const total = m.prompts_total ?? 0;
+      base.calls = `${done} / ${total} prompts`;
+      if (m.responses != null) base.tokens = `${m.responses} resp`;
+    }
+
+    // Agent 2 fan-out: show per-brand progress
+    if (id === 'agent2_scrape' && m.total_brands != null) {
+      const done  = m.completed_brands ?? 0;
+      const total = m.total_brands     ?? 0;
+      base.calls  = `${done} / ${total} brands`;
+      if (m.last_error) base.model = `⚠ ${m.last_error.slice(0, 20)}`;
+    }
+
+    return base;
+  }
+  return s.meta;
+}
+
+// ── Render ────────────────────────────────────────────────────────────────────
+function renderTimeline() {
+  const container = document.getElementById('timeline');
+  container.innerHTML = '';
+
+  STAGES.forEach((s, idx) => {
+    const status = getStatus(idx);
+    const el = document.createElement('div');
+    el.className = 'stage';
+    el.dataset.status = status;
+    el.dataset.idx = idx;
+
+    const agentTag = s.agent
+      ? `<span class="agent-tag">${s.agent}</span>`
+      : '';
+    const parallelTag = s.parallel
+      ? `<span class="parallel-tag">∥ parallel</span>`
+      : '';
+    const scanLine = status === 'active'
+      ? `<div class="scan-line"></div>` : '';
+
+    const metaKeys = ['duration','tokens','model','calls'];
+    const metaLabels = { duration:'duration', tokens:'tokens', model:'model', calls:'calls' };
+    const metaClass = (k,v) => {
+      if (v === '—') return 'dim';
+      if (k === 'tokens' && status === 'done') return 'highlight';
+      if (k === 'duration' && status === 'done') return 'highlight';
+      if (status === 'active') return 'active';
+      return '';
+    };
+
+    const meta = getStageMeta(idx);
+    const metaHtml = metaKeys.map(k => `
+      <div class="meta-item">
+        <span class="meta-key">${metaLabels[k]}</span>
+        <span class="meta-val ${metaClass(k, meta[k])}">${meta[k]}</span>
+      </div>
+    `).join('');
+
+    el.innerHTML = `
+      <div class="stage-index">${String(idx+1).padStart(2,'0')}</div>
+      <div class="stage-node"><div class="node-marker"></div></div>
+      <div class="stage-card">
+        <div class="card-top">
+          <div class="card-left">
+            <span class="stage-name">${s.name}</span>
+            <span class="stage-desc">${s.desc}</span>
+          </div>
+          <div class="card-right">
+            ${parallelTag}
+            ${agentTag}
+            <span class="status-badge ${status}">${status}</span>
+          </div>
+        </div>
+        <div class="card-meta">
+          ${metaHtml}
+        </div>
+        ${scanLine}
+      </div>
+    `;
+
+    el.addEventListener('click', () => {
+      if (status !== 'pending') {
+        el.querySelector('.stage-card').classList.toggle('expanded');
+      }
+    });
+
+    container.appendChild(el);
+  });
+
+  updateSidebar();
+  updateSummary();
+}
+
+function updateSidebar() {
+  const doneCount = liveMode
+    ? STAGES.filter((s,i) => getStatus(i) === 'done').length
+    : currentActive;
+  const total = STAGES.length;
+  const pct   = Math.round((doneCount / total) * 100);
+
+  document.getElementById('progress-fill').style.setProperty('--pct', pct + '%');
+  document.getElementById('sb-pct').textContent = pct + '%';
+
+  const activeId   = liveMode
+    ? Object.entries(liveStatuses).find(([,v]) => v === 'active')?.[0]
+    : (currentActive < total ? STAGES[currentActive].id : null);
+  const activeName = activeId
+    ? (STAGES.find(s => s.id === activeId)?.name ?? 'Complete')
+    : 'Complete';
+  document.getElementById('sb-current').textContent = activeName;
+
+  // Token usage — real values when available, else mock accumulation
+  if (liveMode && liveTokens) {
+    const tu = liveTokens;
+    document.getElementById('sb-prompt-tok').textContent  = fmt(tu.prompt_tokens      || 0);
+    document.getElementById('sb-comp-tok').textContent    = fmt(tu.completion_tokens  || 0);
+    document.getElementById('sb-total-tok').textContent   = fmt(tu.total_tokens       || 0);
+  } else if (!liveMode) {
+    let totalTok = 0, totalCalls = 0;
+    for (let i = 0; i < currentActive; i++) {
+      totalTok   += STAGES[i].summary.tokens;
+      totalCalls += STAGES[i].summary.calls;
+    }
+    document.getElementById('sb-prompt-tok').textContent  = totalTok ? fmt(Math.round(totalTok*0.72)) : '—';
+    document.getElementById('sb-comp-tok').textContent    = totalTok ? fmt(Math.round(totalTok*0.28)) : '—';
+    document.getElementById('sb-total-tok').textContent   = totalTok ? fmt(totalTok) : '—';
+  }
+
+  const isRunning = liveMode
+    ? Object.values(liveStatuses).some(v => v === 'active')
+    : currentActive < total;
+  document.getElementById('live-indicator').style.display = isRunning ? 'block' : 'none';
+
+  // Mode badge in run pill
+  const pill = document.getElementById('hdr-run');
+  if (liveMode) {
+    pill.style.color        = 'var(--violet)';
+    pill.style.borderColor  = 'var(--violet-dim)';
+    pill.title = `Connected to ${STATUS_API_URL}`;
+  } else {
+    pill.style.color        = '';
+    pill.style.borderColor  = '';
+    pill.title = `Demo mode — run status_server.py (port 7654) to go live`;
+  }
+
+  // Models block
+  const modelsEl = document.getElementById('sb-models');
+  modelsEl.innerHTML = PIPELINE_META.models.map(m =>
+    `<div class="stat-row"><span class="stat-val" style="font-size:10px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:180px">${m}</span></div>`
+  ).join('');
+}
+
+function updateSummary() {
+  const doneCount = liveMode
+    ? STAGES.filter((s,i) => getStatus(i) === 'done').length
+    : currentActive;
+  document.getElementById('ts-complete').textContent = `${doneCount} / ${STAGES.length}`;
+
+  if (liveMode && liveSummary) {
+    const s = liveSummary;
+    const tu = s.token_usage || {};
+    document.getElementById('ts-tokens').textContent   = fmt(tu.total_tokens || 0);
+    document.getElementById('ts-entities').textContent = s.entities_found   || '—';
+    document.getElementById('ts-brands').textContent   =
+      (s.brands_profiled && s.brands_profiled.length) || '—';
+    document.getElementById('ts-calls').textContent = '—';
+  } else if (!liveMode) {
+    let totalTok = 0, totalCalls = 0, maxEntities = 0, maxBrands = 0;
+    for (let i = 0; i < doneCount; i++) {
+      totalTok    += STAGES[i].summary.tokens;
+      totalCalls  += STAGES[i].summary.calls;
+      maxEntities  = Math.max(maxEntities, STAGES[i].summary.entities);
+      maxBrands    = Math.max(maxBrands,   STAGES[i].summary.brands);
+    }
+    document.getElementById('ts-tokens').textContent   = totalTok ? fmt(totalTok) : '—';
+    document.getElementById('ts-calls').textContent    = totalCalls || '—';
+    document.getElementById('ts-entities').textContent = maxEntities || '—';
+    document.getElementById('ts-brands').textContent   = maxBrands || '—';
+  }
+}
+
+function fmt(n) {
+  return n.toLocaleString('en-US');
+}
+
+// ── Live polling ──────────────────────────────────────────────────────────────
+async function pollStatus() {
+  try {
+    const res  = await fetch(STATUS_API_URL, { cache: 'no-store' });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const data = await res.json();
+
+    const ps = data.pipeline_status;
+    const sm = data.pipeline_summary;
+
+    if (ps) {
+      liveMode = true;
+
+      // Rebuild liveStatuses from stages dict.
+      // Only trust "done"/"error" from the stages dict — "active" entries can be
+      // stale (e.g. leftover from a previous crashed run). The single source of
+      // truth for which stage is currently running is ps.active_stage.
+      const newStatuses = {};
+      for (const [id, info] of Object.entries(ps.stages || {})) {
+        const s = info.status;
+        if (s === 'done' || s === 'error') {
+          newStatuses[id] = s;
+        }
+      }
+      // Mark active stage (only when pipeline is running)
+      if (ps.active_stage && ps.pipeline_running !== false) {
+        newStatuses[ps.active_stage] = 'active';
+      }
+      liveStatuses = newStatuses;
+      liveMeta     = ps.stages || {};
+
+      // Scroll active stage into view (once)
+      const activeId  = ps.active_stage;
+      const activeIdx = STAGES.findIndex(s => s.id === activeId);
+      if (activeIdx >= 0) {
+        const el = document.querySelector(`.stage[data-idx="${activeIdx}"]`);
+        if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }
+
+      // Update start time from status file
+      if (ps.started_at) {
+        startTime = ps.started_at * 1000;
+      }
+
+      // Update header query meta
+      if (ps.stages?.parse_query?.query) {
+        document.getElementById('hdr-query').textContent = ps.stages.parse_query.query;
+      }
+      if (ps.stages?.parse_query?.domain) {
+        document.getElementById('hdr-domain').textContent = ps.stages.parse_query.domain;
+      }
+      if (ps.stages?.parse_query?.location) {
+        document.getElementById('hdr-location').textContent = ps.stages.parse_query.location;
+      }
+    }
+
+    if (sm) {
+      liveSummary = sm;
+      liveTokens  = sm.token_usage || null;
+      if (sm.query)    document.getElementById('hdr-query').textContent    = sm.query;
+      if (sm.domain)   document.getElementById('hdr-domain').textContent   = sm.domain;
+      if (sm.location) document.getElementById('hdr-location').textContent = sm.location;
+      if (sm.run_id)   document.getElementById('hdr-run').textContent      =
+        'RUN ' + sm.run_id.slice(-7).toUpperCase();
+    }
+
+    renderTimeline();
+  } catch (_) {
+    // Server not running — stay in manual/demo mode, don't crash
+    if (liveMode) {
+      liveMode = false;
+      renderTimeline();
+    }
+  }
+}
+
+// ── Controls ──────────────────────────────────────────────────────────────────
+function advanceStage() {
+  if (liveMode) return; // live mode: server drives state
+  if (currentActive < STAGES.length) {
+    currentActive++;
+    renderTimeline();
+    if (currentActive < STAGES.length) {
+      const next = document.querySelector(`.stage[data-idx="${currentActive}"]`);
+      if (next) next.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
+  }
+}
+
+function resetPipeline() {
+  currentActive = 0;
+  liveMode      = false;
+  liveStatuses  = {};
+  liveMeta      = {};
+  liveSummary   = null;
+  liveTokens    = null;
+  startTime     = Date.now();
+  renderTimeline();
+  initHeader();
+  document.querySelector('[data-idx="0"]')?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+}
+
+// ── Header meta ───────────────────────────────────────────────────────────────
+function initHeader() {
+  document.getElementById('hdr-query').textContent    = PIPELINE_META.query;
+  document.getElementById('hdr-domain').textContent   = PIPELINE_META.domain;
+  document.getElementById('hdr-location').textContent = PIPELINE_META.location;
+  document.getElementById('hdr-run').textContent      = 'RUN ' + PIPELINE_META.run_id.slice(-7).toUpperCase();
+
+  const now = new Date();
+  document.getElementById('sb-started').textContent =
+    now.toTimeString().slice(0,8);
+
+  if (elapsedInterval) clearInterval(elapsedInterval);
+  elapsedInterval = setInterval(() => {
+    const sec = Math.floor((Date.now() - startTime) / 1000);
+    const m   = String(Math.floor(sec / 60)).padStart(2,'0');
+    const s   = String(sec % 60).padStart(2,'0');
+    document.getElementById('sb-elapsed').textContent = `${m}:${s}`;
+  }, 1000);
+}
+
+// ── Init ──────────────────────────────────────────────────────────────────────
+initHeader();
+renderTimeline();
+
+// Start polling every 2 seconds
+pollStatus();
+pollTimer = setInterval(pollStatus, 2000);
+
+// Keyboard shortcuts
+document.addEventListener('keydown', e => {
+  if (e.code === 'Space' && !e.target.matches('input,textarea,button')) {
+    e.preventDefault();
+    advanceStage();
+  }
+  if (e.code === 'KeyR' && !e.target.matches('input,textarea')) {
+    resetPipeline();
+  }
+});
+</script>
+</body>
+</html>

@@ -68,72 +68,95 @@ async def agent1_llm_query_all_node(state: dict) -> dict:
     query_models = state.get("query_models", [MODEL_FAST])
     n_runs       = state.get("n_runs", 1)
     domain       = state.get("domain", "Tunisian restaurant")
+    output_dir   = state.get("output_dir", "geo_output")
+
+    from core.status_tracker import emit as _emit
+    n_total = len(prompts)
+    _emit("agent1_query", "active",
+          {"prompts_total": n_total, "prompts_done": 0,
+           "models": len(query_models), "runs": n_runs, "responses": 0},
+          output_dir=output_dir)
 
     system   = _QUERY_SYSTEM_TEMPLATE.format(domain=domain)
     all_rows = []
 
     logger.info(
-        f"[LLMQueryAll] {len(prompts)} prompts × {len(query_models)} models "
+        f"[LLMQueryAll] {n_total} prompts × {len(query_models)} models "
         f"× {n_runs} run(s) — processing prompt-by-prompt"
     )
 
-    for i, prompt in enumerate(prompts):
-        prompt_id   = prompt.get("prompt_id",   "")
-        prompt_text = prompt.get("prompt_text", "")
+    try:
+        for i, prompt in enumerate(prompts):
+            prompt_id   = prompt.get("prompt_id",   "")
+            prompt_text = prompt.get("prompt_text", "")
 
-        # All (model × run) combos for this single prompt
-        combos = [
-            (model_id, run_idx)
-            for model_id in query_models
-            for run_idx  in range(1, n_runs + 1)
-        ]
+            combos = [
+                (model_id, run_idx)
+                for model_id in query_models
+                for run_idx  in range(1, n_runs + 1)
+            ]
 
-        logger.info(
-            f"[LLMQueryAll] {i+1}/{len(prompts)} · {prompt_id} "
-            f"— firing {len(combos)} parallel calls"
-        )
-
-        coros = [
-            _delayed_query(
-                delay=idx * _STAGGER_S,
-                model_id=model_id,
-                prompt_text=prompt_text,
-                system=system,
-                role="query",
+            logger.info(
+                f"[LLMQueryAll] {i+1}/{n_total} · {prompt_id} "
+                f"— firing {len(combos)} parallel calls"
             )
-            for idx, (model_id, _) in enumerate(combos)
-        ]
-        results = await asyncio.gather(*coros, return_exceptions=True)
 
-        # ── inter-prompt breathing room ──────────────────────────────────────
-        if i < len(prompts) - 1:   # no sleep after the last prompt
-            await asyncio.sleep(_INTER_PROMPT_DELAY_S)
-
-        for (model_id, run_idx), result in zip(combos, results):
-            if isinstance(result, BaseException):
-                logger.error(
-                    f"[LLMQueryAll] {prompt_id}/{model_id}/run_{run_idx}: {result}"
+            coros = [
+                _delayed_query(
+                    delay=idx * _STAGGER_S,
+                    model_id=model_id,
+                    prompt_text=prompt_text,
+                    system=system,
+                    role="query",
                 )
-                continue
-            raw_text = result.get("raw_response", "")
-            if not raw_text:
-                logger.warning(
-                    f"[LLMQueryAll] Empty response: {prompt_id}/{model_id}/run_{run_idx}"
-                )
-                continue
-            all_rows.append({
-                "prompt_id":         prompt_id,
-                "prompt_text":       prompt_text,
-                "model_id":          model_id,
-                "run_idx":           run_idx,
-                "response_text":     raw_text,
-                "completion_tokens": result.get("completion_tokens", 0),
-                "prompt_tokens":     result.get("prompt_tokens", 0),
-                "total_tokens":      result.get("total_tokens", 0),
-            })
+                for idx, (model_id, _) in enumerate(combos)
+            ]
+            results = await asyncio.gather(*coros, return_exceptions=True)
 
-    logger.info(f"[LLMQueryAll] Complete — {len(all_rows)} responses collected")
-    return {"raw_responses": all_rows}
+            if i < n_total - 1:
+                await asyncio.sleep(_INTER_PROMPT_DELAY_S)
+
+            for (model_id, run_idx), result in zip(combos, results):
+                if isinstance(result, BaseException):
+                    logger.error(
+                        f"[LLMQueryAll] {prompt_id}/{model_id}/run_{run_idx}: {result}"
+                    )
+                    continue
+                raw_text = result.get("raw_response", "")
+                if not raw_text:
+                    logger.warning(
+                        f"[LLMQueryAll] Empty response: {prompt_id}/{model_id}/run_{run_idx}"
+                    )
+                    continue
+                all_rows.append({
+                    "prompt_id":         prompt_id,
+                    "prompt_text":       prompt_text,
+                    "model_id":          model_id,
+                    "run_idx":           run_idx,
+                    "response_text":     raw_text,
+                    "completion_tokens": result.get("completion_tokens", 0),
+                    "prompt_tokens":     result.get("prompt_tokens", 0),
+                    "total_tokens":      result.get("total_tokens", 0),
+                })
+
+            # Progress update after each prompt completes
+            _emit("agent1_query", "active",
+                  {"prompts_done": i + 1, "prompts_total": n_total,
+                   "responses": len(all_rows)},
+                  output_dir=output_dir)
+
+        logger.info(f"[LLMQueryAll] Complete — {len(all_rows)} responses collected")
+        _emit("agent1_query", "done",
+              {"responses": len(all_rows), "prompts_total": n_total},
+              output_dir=output_dir)
+        return {"raw_responses": all_rows}
+
+    except Exception as exc:
+        logger.error(f"[LLMQueryAll] {exc}")
+        _emit("agent1_query", "error",
+              {"error": str(exc), "responses_so_far": len(all_rows)},
+              output_dir=output_dir)
+        raise
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

@@ -36,7 +36,8 @@ def wikipedia_lookup(entity: str) -> dict:
                     result["url"]           = page.fullurl
                     return result
     except Exception as e:
-        return {"status": "error", "error": str(e)}
+        result["status"] = "error"
+        result["error"]  = str(e)
 
     return result
 

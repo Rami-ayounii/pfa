@@ -24,23 +24,59 @@ from config import GROQ_API_KEY
 # preference order among the ones that are available and not rate-limited.
 # ---------------------------------------------------------------------------
 
-# Keywords that identify model quality tier (higher index = lower preference)
-_TIER_KEYWORDS = [
-    # Tier 0 — largest / best
-    ["70b", "72b", "qwen3-32b", "qwen-32b"],
-    # Tier 1 — medium
-    ["32b", "13b", "14b", "8b-instant", "small"],
-    # Tier 2 — fast / small
-    ["8b", "7b", "instant", "mini"],
+_TIER_PATTERNS = [
+    (0, re.compile(r"70b|72b|qwen3-32b|qwen-32b|qwq|llama-4|gemma-3-27b|deepseek-r1|deepseek-v3|gpt-oss-120b", re.I)),
+    (1, re.compile(r"32b|13b|14b|8b-instant|small|gemma2|gemma-3-12b|phi-4|qwen3-14b|gpt-oss-20b", re.I)),
+    (2, re.compile(r"8b|7b|9b|instant|mini|qwen3-8b|3b", re.I)),
 ]
 
 
 def _tier(model_id: str) -> int:
-    mid = model_id.lower()
-    for i, keywords in enumerate(_TIER_KEYWORDS):
-        if any(kw in mid for kw in keywords):
-            return i
+    for tier, pattern in _TIER_PATTERNS:
+        if pattern.search(model_id):
+            return tier
     return 99  # unknown — lowest preference
+
+
+# ---------------------------------------------------------------------------
+# Expanded default model catalog — Groq free + OpenRouter :free (2026)
+# ---------------------------------------------------------------------------
+
+_DEFAULT_MODEL_IDS: list[str] = [
+    # Groq free
+    "llama-3.3-70b-versatile",
+    "meta-llama/llama-4-scout-17b-16e-instruct",
+    "meta-llama/llama-4-maverick-17b-128e-instruct",
+    "qwen-qwq-32b",
+    "llama-3.1-8b-instant",
+    "gemma2-9b-it",
+    "llama-3.2-3b-preview",
+    "llama3-8b-8192",
+    # OpenRouter free
+    "meta-llama/llama-3.3-70b-instruct:free",
+    "qwen/qwen3-32b:free",
+    "qwen/qwen2.5-72b-instruct:free",
+    "qwen/qwen3-14b:free",
+    "qwen/qwen3-8b:free",
+    "google/gemma-3-27b-it:free",
+    "google/gemma-3-12b-it:free",
+    "microsoft/phi-4:free",
+    "deepseek/deepseek-r1:free",
+    "deepseek/deepseek-v3-0324:free",
+    "openai/gpt-oss-20b",
+]
+
+# Per-model TPM limits (tokens per minute). Used by llm_client for budget tracking.
+_TPM_LIMITS: dict[str, int] = {
+    "llama-3.3-70b-versatile":                       300_000,
+    "meta-llama/llama-4-scout-17b-16e-instruct":      300_000,
+    "meta-llama/llama-4-maverick-17b-128e-instruct":  300_000,
+    "llama-3.1-8b-instant":                           250_000,
+    "llama-3.2-3b-preview":                           100_000,
+    "gemma2-9b-it":                                    15_000,
+    "llama3-8b-8192":                                  30_000,
+    "qwen-qwq-32b":                                     8_000,
+}
 
 
 # ---------------------------------------------------------------------------
@@ -80,9 +116,9 @@ class _ModelState:
 class ModelRegistry:
     """Discovers and tracks Groq models. Thread-safe."""
 
-    # Models that are irrelevant for text generation (whisper, tts, vision-only, etc.)
+    # Models that are irrelevant or incompatible (small max_tokens, non-text, etc.)
     _SKIP_PATTERNS = re.compile(
-        r"whisper|tts|vision|guard|distil|embed|rerank|reward|tool", re.I
+        r"whisper|tts|vision|guard|distil|embed|rerank|reward|tool|allam", re.I
     )
 
     def __init__(self):
@@ -109,14 +145,7 @@ class ModelRegistry:
             print(f"[registry] Discovered {len(discovered)} models: {discovered}")
         except Exception as e:
             print(f"[registry] Could not discover models from API ({e}) — using defaults")
-            # Minimal fallback so the pipeline can still run
-            defaults = [
-                "llama-3.3-70b-versatile",
-                "llama-3.1-8b-instant",
-                "qwen/qwen3-32b",
-                "llama3-8b-8192",
-            ]
-            for mid in defaults:
+            for mid in _DEFAULT_MODEL_IDS:
                 self._states[mid] = _ModelState(mid)
         self._loaded = True
 
@@ -179,6 +208,10 @@ class ModelRegistry:
         with self._lock:
             if model_id in self._states:
                 self._states[model_id].mark_tpm(retry_after_seconds)
+
+    def tpm_limit(self, model_id: str) -> int:
+        """Return the known TPM limit for a model, or 200_000 as a safe default."""
+        return _TPM_LIMITS.get(model_id, 200_000)
 
     def available_count(self) -> int:
         """Returns number of models currently available (not TPD-exhausted, not TPM-blocked)."""

@@ -45,6 +45,7 @@ logger.add(
 from graph.pipeline_graph import build_graph
 from graph.state import initial_state
 from core.memory import KnowledgeBase
+from core.status_tracker import reset as _reset_status
 from config import (
     OUTPUT_DIR,
     N_RUNS,
@@ -97,6 +98,7 @@ def run_graph_pipeline(
     output_dir = output_dir or OUTPUT_DIR
 
     os.makedirs(output_dir, exist_ok=True)
+    _reset_status(output_dir)  # clear stale pipeline_status.json from any previous run
 
     kb     = KnowledgeBase(kb_path=os.path.join(output_dir, "geo_knowledge.json"))
     run_id = datetime.now().strftime("%Y%m%d_%H%M%S") + "_" + uuid.uuid4().hex[:4]
@@ -181,7 +183,7 @@ if __name__ == "__main__":
     parser.add_argument("--n_runs",                type=int,  default=2)
     parser.add_argument("--max_prompts_per_intent", type=int, default=6)
     parser.add_argument("--top_n",                 type=int,  default=10, dest="top_n_brands")
-    parser.add_argument("--output_dir",            default="geo_output")
+    parser.add_argument("--output_dir",            default=OUTPUT_DIR)
     parser.add_argument("--max_retries",           type=int,  default=1)
     args = parser.parse_args()
 

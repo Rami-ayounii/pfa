@@ -59,7 +59,7 @@ def supervisor0_node(state: dict) -> dict:
     if not prompt_set:
         note = "supervisor0: no prompts produced - aborting"
         notes.append(note)
-        return {**state, "supervisor_notes": notes, "current_step": "supervisor0_abort"}
+        return {"supervisor_notes": notes, "current_step": "supervisor0_abort"}
 
     n_intents_req = state.get('n_intents', 4)
     langs_req     = state.get('languages', ['fr'])
@@ -100,16 +100,15 @@ Respond ONLY with:
     print(f"\n[Supervisor 0] {note}")
 
     if decision == "retry" and retries < max_r:
+        # Return only the delta — do NOT spread {**state} or Annotated lists get doubled.
         return {
-            **state,
-            "prompts":          [],   # Project 2 field name
+            "prompts":          [],
             "agent0_retries":   retries + 1,
             "supervisor_notes": notes,
             "current_step":     "supervisor0_retry",
         }
 
     return {
-        **state,
         "agent0_quality_score": float(score),
         "supervisor_notes":     notes,
         "current_step":         "supervisor0_ok",
@@ -141,7 +140,7 @@ def supervisor1_node(state: dict) -> dict:
     if not global_feats:
         note = "supervisor1: no entity features produced - aborting"
         notes.append(note)
-        return {**state, "supervisor_notes": notes, "current_step": "supervisor1_abort"}
+        return {"supervisor_notes": notes, "current_step": "supervisor1_abort"}
 
     stable   = sum(1 for e in global_feats if e.get("consistency_label") == "stable")
     variable = sum(1 for e in global_feats if e.get("consistency_label") == "variable")
@@ -187,12 +186,10 @@ Respond ONLY with:
     print(f"\n[Supervisor 1] {note}")
 
     if decision == "retry" and retries < max_r:
+        # Return only the delta — do NOT spread {**state} or Annotated lists get doubled.
+        # NOTE: raw_responses/errors/warnings can't be cleared via Annotated[list, operator.add];
+        # the aggregate node will re-process them, but that is better than doubling on every node.
         return {
-            **state,
-            "raw_responses":          [],
-            "extracted_entities":     [],
-            "clean_entities":         [],
-            "entity_features":        [],
             "entity_features_global": [],
             "agent1_retries":         retries + 1,
             "supervisor_notes":       notes,
@@ -200,9 +197,9 @@ Respond ONLY with:
         }
 
     return {
-        **state,
-        "supervisor_notes": notes,
-        "current_step":     "supervisor1_ok",
+        "agent1_quality_score": float(score),
+        "supervisor_notes":     notes,
+        "current_step":         "supervisor1_ok",
     }
 
 
@@ -231,7 +228,7 @@ def supervisor2_node(state: dict) -> dict:
     if not web_feats:
         note = "supervisor2: no web features produced - aborting"
         notes.append(note)
-        return {**state, "supervisor_notes": notes, "current_step": "supervisor2_abort"}
+        return {"supervisor_notes": notes, "current_step": "supervisor2_abort"}
 
     coverage = round(n_web / n_entities, 2) if n_entities else 0
     sample   = web_feats[:3]
@@ -266,18 +263,17 @@ Respond ONLY with:
     print(f"\n[Supervisor 2] {note}")
 
     if decision == "retry" and retries < max_r:
+        # Return only the delta — do NOT spread {**state} or Annotated lists get doubled.
         return {
-            **state,
-            "profiles":         [],   # Project 2 field name
             "agent2_retries":   retries + 1,
             "supervisor_notes": notes,
             "current_step":     "supervisor2_retry",
         }
 
     return {
-        **state,
-        "supervisor_notes": notes,
-        "current_step":     "supervisor2_ok",
+        "agent2_coverage_score": float(score),
+        "supervisor_notes":      notes,
+        "current_step":          "supervisor2_ok",
     }
 
 

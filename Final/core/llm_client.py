@@ -26,7 +26,7 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))  # Final/ is root
 
-import os, re, json, time, hashlib, asyncio, requests, random
+import os, re, json, time, hashlib, asyncio, requests, random, threading
 from collections import deque as _deque
 from groq import Groq
 from loguru import logger
@@ -37,7 +37,7 @@ from config import (
     MODEL_FAST, MODEL_STRONG, MODEL_EXTRACTOR,
     MODEL_COMPOUND, MODEL_GPTOSS, MODEL_QWEN, MODEL_LLAMA4,
     MODEL_ANALYST, MODEL_KIMI,
-    OPENROUTER_MODELS,
+    OPENROUTER_MODELS, MAX_CONCURRENT_OR, OR_RPM,
 )
 from core.model_registry import registry  # type: ignore[import]
 
@@ -54,9 +54,51 @@ GROQ_TO_OPENROUTER_FALLBACK: dict[str, str] = {
 }
 
 # ── Concurrency / rate-limit controls ────────────────────────────────────────
-_COMPOUND_EXTRA_DELAY = float(os.environ.get("COMPOUND_EXTRA_DELAY", "2.5"))
+_COMPOUND_EXTRA_DELAY    = float(os.environ.get("COMPOUND_EXTRA_DELAY", "0.3"))
+_SWITCH_MODEL_THRESHOLD  = 4.0   # switch Groq model if wait > 4s AND another model available
+MAX_BACKOFF_SLEEP        = 5.0   # never sleep longer than 5s; switch instead
+_OR_MAX_WAIT             = 10.0  # OpenRouter: skip to next model if 429 wait exceeds this
 
 _llm_semaphore: asyncio.Semaphore | None = None
+
+# ── OpenRouter rate controls ──────────────────────────────────────────────────
+# Free tier: ~20 req/min. Cap concurrency and track the sliding window.
+_or_semaphore   = threading.Semaphore(MAX_CONCURRENT_OR)
+_or_window: _deque = _deque()        # monotonic timestamps of recent OR requests
+_or_window_lock = threading.Lock()
+
+def _or_wait_for_slot() -> None:
+    """Block until there is capacity within the OR_RPM sliding-window budget."""
+    while True:
+        with _or_window_lock:
+            now = time.monotonic()
+            while _or_window and now - _or_window[0] > 60.0:
+                _or_window.popleft()
+            if len(_or_window) < OR_RPM:
+                _or_window.append(now)
+                return
+            sleep_for = 61.0 - (now - _or_window[0])
+        jitter = random.uniform(0.5, 2.0)
+        wait   = max(sleep_for, 0.0) + jitter
+        logger.info(f"[OR gate] {len(_or_window)}/{OR_RPM} req/min — pausing {wait:.1f}s")
+        time.sleep(wait)
+
+def _parse_retry_after(headers: dict) -> float:
+    """Return seconds to wait from a Retry-After header (integer or HTTP-date)."""
+    ra = headers.get("Retry-After") or headers.get("retry-after", "")
+    if not ra:
+        return 0.0
+    try:
+        return float(ra)
+    except ValueError:
+        pass
+    try:
+        from email.utils import parsedate_to_datetime
+        retry_dt = parsedate_to_datetime(ra)
+        delta = (retry_dt - __import__("datetime").datetime.now(retry_dt.tzinfo)).total_seconds()
+        return max(delta, 0.0)
+    except Exception:
+        return 0.0
 
 def _get_semaphore() -> asyncio.Semaphore:
     global _llm_semaphore
@@ -169,6 +211,12 @@ def _is_daily_limit(err: str) -> bool:
 FATAL_ERRORS = ["model not found", "invalid api key", "authentication",
                 "permission denied", "does not exist"]
 
+# Errors that indicate the request is too large for this model — skip it
+# immediately (mark tpd_exhausted so registry picks another model) but do
+# NOT treat as globally fatal (another model may handle the same prompt).
+_CTX_OVERFLOW_MARKERS = ["request too large", "context_length_exceeded",
+                         "maximum context length"]
+
 def _empty_result() -> dict:
     return {"raw_response": "", "completion_tokens": 0,
             "prompt_tokens": 0, "total_tokens": 0}
@@ -213,14 +261,24 @@ def query_llm(model: str, prompt: str, system: str = "",
             if any(f in err.lower() for f in FATAL_ERRORS):
                 _fatal = True
                 break
+            if any(m in err.lower() for m in _CTX_OVERFLOW_MARKERS):
+                logger.warning(f"Request too large for {model} — skipping this model")
+                registry.mark_tpd_exhausted(model)
+                continue  # pick a different model next attempt, no sleep
             if _is_daily_limit(err):
                 registry.mark_tpd_exhausted(model)
             else:
                 wait_base = _parse_wait(err) or (2 ** attempt)
-                registry.mark_tpm(model, wait_base)
-                wait = wait_base * random.uniform(0.5, 1.8)
-                logger.debug(f"Waiting {wait:.1f}s (base={wait_base:.0f}s, jittered) …")
-                time.sleep(wait + 1)
+                if wait_base > _SWITCH_MODEL_THRESHOLD and registry.available_count() > 1:
+                    registry.mark_tpm(model, min(wait_base, 60.0))
+                    model = registry.select(preferred=model)
+                    logger.info(f"429 wait {wait_base:.0f}s → switching to {model}")
+                    # no sleep — immediately retry with new model
+                else:
+                    registry.mark_tpm(model, wait_base)
+                    wait = min(wait_base, MAX_BACKOFF_SLEEP) * random.uniform(0.8, 1.2)
+                    logger.debug(f"Waiting {wait:.1f}s (base={wait_base:.0f}s, jittered) …")
+                    time.sleep(wait)
 
     if not _fatal and OPENROUTER_API_KEY:
         _or_model  = GROQ_TO_OPENROUTER_FALLBACK.get(model)
@@ -290,15 +348,24 @@ async def async_query_llm(model: str, prompt: str, system: str = "",
                     if any(f in err.lower() for f in FATAL_ERRORS):
                         logger.error(f"[async] Fatal error for model={model} — not retrying.")
                         _fatal = True
+                    elif any(m in err.lower() for m in _CTX_OVERFLOW_MARKERS):
+                        logger.warning(f"[async] Request too large for {model} — skipping")
+                        registry.mark_tpd_exhausted(model)
+                        # _wait stays 0 so we immediately retry with a different model
                     else:
-                        wait_base = _parse_wait(err) or random.uniform(8.0, 20.0)
+                        wait_base = _parse_wait(err) or random.uniform(1.0, 3.0)
                         if _is_daily_limit(err):
                             registry.mark_tpd_exhausted(model)
+                        elif wait_base > _SWITCH_MODEL_THRESHOLD and registry.available_count() > 1:
+                            registry.mark_tpm(model, min(wait_base, 60.0))
+                            model = registry.select(preferred=_requested)
+                            logger.info(f"[async] 429 wait {wait_base:.0f}s → switching to {model}")
+                            _wait = 0.0  # immediate retry with new model
                         else:
                             registry.mark_tpm(model, wait_base)
-                        _wait = wait_base * random.uniform(0.5, 1.8)
-                        logger.debug(f"[async] Waiting {_wait:.1f}s "
-                                     f"(base={wait_base:.0f}s, jittered) …")
+                            _wait = min(wait_base, MAX_BACKOFF_SLEEP) * random.uniform(0.8, 1.2)
+                            logger.debug(f"[async] Waiting {_wait:.1f}s "
+                                         f"(base={wait_base:.0f}s, jittered) …")
 
         if _succeeded:
             if _is_compound:
@@ -380,74 +447,116 @@ def query_openrouter(prompt: str, api_key: str | None = None,
                      max_tokens: int = 1024, temperature: float = 0.2,
                      max_retries: int = 3,
                      models: list | None = None) -> str:
-    """OpenRouter call with model fallback and exponential back-off on 429."""
+    """
+    OpenRouter call with:
+      - threading.Semaphore to cap concurrent calls (MAX_CONCURRENT_OR)
+      - Sliding-window RPM guard (OR_RPM)
+      - Retry-After header parsing for accurate 429 back-off
+      - Exponential back-off with jitter as fallback
+      - Model rotation across the fallback list
+    """
     key      = api_key or OPENROUTER_API_KEY
     endpoint = "https://openrouter.ai/api/v1/chat/completions"
     _models  = models if models is not None else OPENROUTER_MODELS
 
-    for model in _models:
-        for attempt in range(max_retries):
-            try:
-                resp = requests.post(
-                    endpoint,
-                    headers={"Authorization": f"Bearer {key}",
-                             "HTTP-Referer": "https://geo-agent.local",
-                             "Content-Type": "application/json"},
-                    json={"model": model, "messages": [{"role": "user", "content": prompt}],
-                          "max_tokens": max_tokens, "temperature": temperature},
-                    timeout=45,
-                )
-                if resp.status_code == 429:
-                    wait = (2 ** attempt) * 5
-                    logger.warning(f"[429] {model} — waiting {wait}s …")
-                    time.sleep(wait); continue
-                if resp.status_code == 404:
-                    logger.debug(f"[404] {model} — trying next model"); break
-                if resp.status_code != 200:
-                    break
-                data = resp.json()
-                if "error" in data:
-                    if data["error"].get("code") == 429:
-                        time.sleep((2 ** attempt) * 5); continue
-                    break
-                content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
-                if content:
-                    logger.debug(f"[OK] OpenRouter ({model})")
-                    return content
-                break
-            except requests.exceptions.Timeout:
-                time.sleep(3)
-            except Exception as exc:
-                logger.error(f"OpenRouter error: {exc}"); break
+    with _or_semaphore:                     # cap concurrent OR calls
+        for model in _models:
+            for attempt in range(max_retries):
+                _or_wait_for_slot()         # honour RPM budget before every request
+                try:
+                    resp = requests.post(
+                        endpoint,
+                        headers={"Authorization": f"Bearer {key}",
+                                 "HTTP-Referer": "https://geo-agent.local",
+                                 "Content-Type": "application/json"},
+                        json={"model": model,
+                              "messages": [{"role": "user", "content": prompt}],
+                              "max_tokens": max_tokens, "temperature": temperature},
+                        timeout=60,
+                    )
 
-    logger.warning("All OpenRouter models exhausted.")
+                    if resp.status_code == 429:
+                        ra   = _parse_retry_after(dict(resp.headers))
+                        wait = ra if ra > 0 else (2 ** attempt) * 3 + random.uniform(0.5, 2)
+                        if wait > _OR_MAX_WAIT:
+                            logger.warning(f"[OR 429] {model} wait {wait:.0f}s > {_OR_MAX_WAIT:.0f}s — rotating to next model")
+                            break
+                        logger.warning(f"[OR 429] {model} attempt {attempt+1}/{max_retries} — waiting {wait:.1f}s")
+                        time.sleep(wait)
+                        continue
+
+                    if resp.status_code == 404:
+                        logger.debug(f"[OR 404] {model} — trying next model")
+                        break
+
+                    if resp.status_code != 200:
+                        logger.warning(f"[OR {resp.status_code}] {model} — trying next model")
+                        break
+
+                    data = resp.json()
+                    if "error" in data:
+                        code = data["error"].get("code") or data["error"].get("status")
+                        if code == 429 or str(code) == "429":
+                            wait = (2 ** attempt) * 3 + random.uniform(0.5, 2)
+                            if wait > _OR_MAX_WAIT:
+                                logger.warning(f"[OR 429 body] {model} wait {wait:.0f}s — rotating to next model")
+                                break
+                            logger.warning(f"[OR 429 body] {model} — waiting {wait:.1f}s")
+                            time.sleep(wait)
+                            continue
+                        logger.warning(f"[OR error] {model}: {data['error']}")
+                        break
+
+                    content = (data.get("choices") or [{}])[0].get("message", {}).get("content", "")
+                    if content:
+                        logger.debug(f"[OR OK] {model}")
+                        return content
+                    break
+
+                except requests.exceptions.Timeout:
+                    wait = (2 ** attempt) * 3 + random.uniform(0, 2)
+                    logger.warning(f"[OR timeout] {model} attempt {attempt+1} — retrying in {wait:.1f}s")
+                    time.sleep(wait)
+                except Exception as exc:
+                    logger.error(f"[OR error] {model}: {exc}")
+                    break
+
+    logger.warning("[OR] All models exhausted — no response from OpenRouter.")
     return ""
 
 # ── LLM response cache ────────────────────────────────────────────────────────
-LLM_CACHE_FILE = "llm_cache.json"
+LLM_CACHE_FILE = str(Path(__file__).parent.parent / "llm_cache.json")
 
+# Load once at import time; keep in memory for the process lifetime.
 def _load_cache() -> dict:
     try:
-        with open(LLM_CACHE_FILE) as f: return json.load(f)
+        with open(LLM_CACHE_FILE) as f:
+            return json.load(f)
     except Exception:
         return {}
 
-def _save_cache(cache: dict):
+_llm_cache: dict = _load_cache()
+_cache_lock = threading.Lock()
+
+def _save_cache() -> None:
     try:
-        with open(LLM_CACHE_FILE, "w") as f: json.dump(cache, f, indent=2)
-    except Exception: pass
+        with open(LLM_CACHE_FILE, "w") as f:
+            json.dump(_llm_cache, f, indent=2)
+    except Exception:
+        pass
 
 def cached_llm_call(prompt: str, call_fn) -> str:
     """Call LLM only if this exact prompt has not been called before."""
-    cache = _load_cache()
-    key   = hashlib.md5(prompt.encode()).hexdigest()
-    if key in cache:
-        logger.debug("Using cached LLM response")
-        return cache[key]
+    key = hashlib.md5(prompt.encode()).hexdigest()
+    with _cache_lock:
+        if key in _llm_cache:
+            logger.debug("Using cached LLM response")
+            return _llm_cache[key]
     result = call_fn(prompt)
     if result:
-        cache[key] = result
-        _save_cache(cache)
+        with _cache_lock:
+            _llm_cache[key] = result
+        _save_cache()
     return result
 
 # ── Robust JSON parser ────────────────────────────────────────────────────────

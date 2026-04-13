@@ -58,7 +58,7 @@ from graph.nodes.supervisor_nodes import (
     route_after_supervisor0, route_after_supervisor1, route_after_supervisor2,
 )
 from graph.nodes.monitor_node import monitor_node
-from graph.nodes.agent2_scrape_node import agent2_scrape_node
+from graph.nodes.agent2_scrape_node import agent2_scrape_node, agent2_all_node
 from graph.nodes.export_node import export_node
 
 
@@ -67,14 +67,17 @@ from graph.nodes.export_node import export_node
 
 def route_brand_scraping(state: GEOState) -> list[Send]:
     """
-    Fan-out: generate one Send per brand.
-    Each Send runs agent2_scrape_node in parallel.
+    Route all brands to agent2_all_node as a single batch.
+
+    All brands are researched inside one MCP client session so the three
+    MCP subprocesses (search, scrape, wiki) are started once and reused,
+    instead of being spawned and killed once per brand.
     If no brands are present, skip Agent 2 and go straight to export.
     """
     brands = state.get("brands", [])
     if not brands:
         return [Send("export_node", state)]
-    return [Send("agent2_scrape_node", {**state, "brand": b}) for b in brands]
+    return [Send("agent2_all_node", state)]
 
 
 # ── Graph builder ──────────────────────────────────────────────────────────────
@@ -107,6 +110,7 @@ def build_graph():
     graph.add_node("supervisor1_node",          supervisor1_node)
     graph.add_node("monitor_node",              monitor_node)
     graph.add_node("agent2_scrape_node",        agent2_scrape_node)
+    graph.add_node("agent2_all_node",           agent2_all_node)
     graph.add_node("export_node",               export_node)
     graph.add_node("supervisor2_node",          supervisor2_node)
 
@@ -146,13 +150,13 @@ def build_graph():
         },
     )
 
-    # ── Fan-out: brand scraping (parallel) ────────────────────────────────────
+    # ── Agent 2: all brands in one batched session ────────────────────────────
     graph.add_conditional_edges(
         "monitor_node",
         route_brand_scraping,
-        ["agent2_scrape_node", "export_node"],  # router may skip to export if no brands
+        ["agent2_all_node", "export_node"],  # router may skip to export if no brands
     )
-    graph.add_edge("agent2_scrape_node", "export_node")
+    graph.add_edge("agent2_all_node", "export_node")
     graph.add_edge("export_node",        "supervisor2_node")
 
     # supervisor2: retry → monitor_node (re-run agent2) | ok → END | abort → END

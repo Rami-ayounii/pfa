@@ -1,15 +1,14 @@
-"""Agent 2 (ReAct/MCP) - Web feature extraction via MCP tool servers.
+"""Agent 2 — Web feature extraction via MCP tool servers.
 
-Replaces the hardcoded process_entity() loop with a LangGraph ReAct agent
-that decides which tools to call per entity based on what it finds.
+Calls MCP tools in a fixed sequence directly (no ReAct LLM loop), which
+reduces per-entity LLM calls from ~10–12 down to zero for the research step.
 
-All entities are researched inside a single async context so MCP server
-subprocesses are started once and reused — avoiding per-entity startup cost.
+All entities share one MCP client session so the three subprocesses
+(search_server, scrape_server, wiki_server) are started once per run.
 """
 
 import sys
 import os
-import json
 import asyncio
 import csv
 import re
@@ -18,11 +17,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from config import GROQ_API_KEY, MODEL_STRONG as GROQ_MODEL
+from config import AGENT2_OUTPUT_DIR
 
-from langchain_groq import ChatGroq
 from langchain_mcp_adapters.client import MultiServerMCPClient
-from langgraph.prebuilt import create_react_agent
 
 # ---------------------------------------------------------------------------
 # MCP server definitions
@@ -52,51 +49,6 @@ MCP_SERVERS = {
     },
 }
 
-# ---------------------------------------------------------------------------
-# System prompt
-# ---------------------------------------------------------------------------
-
-SYSTEM_PROMPT = """You are a research agent for a GEO (Generative Engine Optimization) pipeline.
-Your job is to collect web presence data for a restaurant entity.
-
-For each entity you MUST follow this research protocol:
-1. Call google_maps_search to get Google Maps data (rating, reviews, address, website).
-2. Call wikipedia_lookup to check Wikipedia presence.
-3. Call tripadvisor_search to get TripAdvisor data.
-4. If google_maps_search returned a website URL, call extract_website_socials on that URL.
-5. If an Instagram handle was found (from website socials), call scrape_instagram.
-6. If a Facebook handle was found, call scrape_facebook.
-7. If no social handles found from website, use ddg_search to find them:
-   - Query: "<entity> site:instagram.com"
-   - Query: "<entity> site:facebook.com"
-
-After completing all research, output ONLY a JSON object with these exact keys:
-{
-  "canonical_entity": "<entity name>",
-  "is_restaurant": true/false,
-  "gm_rating": <float or null>,
-  "gm_review_count": <int or null>,
-  "gm_address": "<string or null>",
-  "gm_phone": "<string or null>",
-  "gm_website": "<string or null>",
-  "gm_category": "<string or null>",
-  "ta_rating": <float or null>,
-  "ta_review_count": <int or null>,
-  "ta_url": "<string or null>",
-  "has_wikipedia": true/false,
-  "ig_handle": "<string or null>",
-  "ig_followers": <int or 0>,
-  "ig_posts": <int or 0>,
-  "ig_engagement_rate": <float or 0.0>,
-  "ig_bio": "<string or null>",
-  "fb_handle": "<string or null>",
-  "fb_page_likes": <int or 0>,
-  "fb_post_engagement": <float or 0.0>,
-  "overall_confidence": <0.0-1.0>,
-  "scrape_timestamp": "<ISO timestamp>"
-}
-Output ONLY the JSON. No explanation, no markdown fences.
-"""
 
 # ---------------------------------------------------------------------------
 # Derived features
@@ -138,7 +90,9 @@ def _compute_derived(row: dict) -> dict:
 # Checkpoint helpers
 # ---------------------------------------------------------------------------
 
-OUTPUT_DIR      = "agent2_output"
+# Anchor output to Final/ so the path is stable regardless of working directory.
+_FINAL_DIR      = Path(__file__).parent.parent
+OUTPUT_DIR      = str(_FINAL_DIR / AGENT2_OUTPUT_DIR)
 CHECKPOINT_FILE = os.path.join(OUTPUT_DIR, "web_features.csv")
 
 
@@ -167,66 +121,151 @@ def _save_row(row: dict):
 # Async research — all entities share one MCP client session
 # ---------------------------------------------------------------------------
 
-def _parse_row(text: str, entity: str) -> dict:
-    """Extract JSON from agent response."""
-    clean = text.strip()
-    if "```" in clean:
-        m = re.search(r"```(?:json)?\s*([\s\S]*?)```", clean)
-        if m:
-            clean = m.group(1).strip()
-    # Try full parse first
-    try:
-        return json.loads(clean)
-    except json.JSONDecodeError:
-        pass
-    # Try extracting first {...} block
-    m = re.search(r"\{[\s\S]*\}", clean)
-    if m:
-        try:
-            return json.loads(m.group())
-        except json.JSONDecodeError:
-            pass
-    return {
-        "canonical_entity": entity,
+_TOOL_TIMEOUT   = 60.0   # seconds per individual tool call
+_ENTITY_TIMEOUT = 300.0  # seconds for all tools on one entity combined
+
+
+async def _research_entity_direct(
+    tools_map: dict,
+    entity: str,
+    location: str = "Tunisia",
+) -> dict:
+    """Execute the fixed research protocol via direct tool calls.
+
+    No LLM is involved — each step calls the MCP tool directly and
+    assigns the result fields. Confidence is computed from data coverage.
+    """
+    row: dict = {
+        "canonical_entity": entity, "is_restaurant": True,
+        "gm_rating": None, "gm_review_count": None, "gm_address": None,
+        "gm_phone": None, "gm_website": None, "gm_category": None,
+        "ta_rating": None, "ta_review_count": None, "ta_url": None,
+        "ta_price_range": None, "ta_cuisine": None,
+        "has_wikipedia": False,
+        "ig_handle": None, "ig_followers": 0, "ig_posts": 0,
+        "ig_engagement_rate": 0.0, "ig_bio": None,
+        "fb_handle": None, "fb_page_likes": 0, "fb_followers": 0,
+        "fb_post_engagement": 0.0,
         "overall_confidence": 0.0,
-        "parse_error": clean[:300],
     }
 
+    async def _call(name: str, **kwargs) -> dict:
+        tool = tools_map.get(name)
+        if tool is None:
+            return {}
+        try:
+            res = await asyncio.wait_for(tool.ainvoke(kwargs), timeout=_TOOL_TIMEOUT)
+            return res if isinstance(res, dict) else {}
+        except asyncio.TimeoutError:
+            print(f"    [{name}] timed out after {_TOOL_TIMEOUT:.0f}s")
+            return {}
+        except Exception as e:
+            print(f"    [{name}] error: {e}")
+            return {}
 
-async def _research_all_async(entities: list[str], llm: ChatGroq,
-                              servers: dict) -> list[dict]:
+    # Step 1: Google Maps
+    gm = await _call("google_maps_search", entity=entity, location=location)
+    for k in ("gm_name", "gm_rating", "gm_review_count", "gm_address",
+              "gm_phone", "gm_website", "gm_category"):
+        if gm.get(k) is not None:
+            row[k] = gm[k]
+
+    # Step 2: Wikipedia
+    wiki = await _call("wikipedia_lookup", entity=entity)
+    row["has_wikipedia"] = bool(wiki.get("has_wikipedia") or wiki.get("found"))
+
+    # Step 3: TripAdvisor
+    ta = await _call("scrape_tripadvisor", entity=entity, location=location)
+    for k in ("ta_name", "ta_rating", "ta_review_count", "ta_url",
+              "ta_price_range", "ta_cuisine"):
+        if ta.get(k) is not None:
+            row[k] = ta[k]
+
+    # Step 4: Website socials (only if Google Maps found a website)
+    ig_handle: str | None = None
+    fb_handle: str | None = None
+    if row.get("gm_website"):
+        socials = await _call("extract_website_socials", website_url=row["gm_website"])
+        ig_handle = socials.get("website_ig")
+        fb_handle = socials.get("website_fb")
+
+    # Step 5: Instagram — from website or DDG fallback
+    if not ig_handle:
+        ddg = await _call("ddg_search", query=f"{entity} site:instagram.com", max_results=3)
+        if isinstance(ddg, list):
+            for r in ddg:
+                m = re.search(r"instagram\.com/([A-Za-z0-9_.]{3,30})", r.get("href", ""))
+                if m:
+                    ig_handle = m.group(1).lower()
+                    break
+
+    if ig_handle:
+        row["ig_handle"] = ig_handle
+        ig = await _call("scrape_instagram", handle=ig_handle)
+        for k in ("ig_followers", "ig_posts", "ig_engagement_rate", "ig_bio"):
+            if ig.get(k) is not None:
+                row[k] = ig[k]
+
+    # Step 6: Facebook — from website or DDG fallback
+    if not fb_handle:
+        ddg_fb = await _call("ddg_search", query=f"{entity} site:facebook.com", max_results=3)
+        if isinstance(ddg_fb, list):
+            for r in ddg_fb:
+                m = re.search(r"facebook\.com/([A-Za-z0-9_.]{3,50})", r.get("href", ""))
+                if m:
+                    fb_handle = m.group(1).lower()
+                    break
+
+    if fb_handle:
+        row["fb_handle"] = fb_handle
+        fb = await _call("scrape_facebook", handle=fb_handle)
+        for k in ("fb_page_likes", "fb_followers", "fb_post_engagement"):
+            if fb.get(k) is not None:
+                row[k] = fb[k]
+
+    # Confidence from data coverage — no LLM call needed
+    signals = [
+        row.get("gm_rating") is not None,
+        row.get("ta_rating") is not None,
+        bool(row.get("ig_handle")),
+        bool(row.get("fb_handle")),
+        bool(row.get("has_wikipedia")),
+        bool(row.get("gm_address")),
+    ]
+    row["overall_confidence"] = round(sum(signals) / len(signals), 2)
+
+    return row
+
+
+async def _research_all_async(entities: list[str], servers: dict,
+                              location: str = "Tunisia") -> list[dict]:
     """Research all entities inside a single MCP client session."""
     results = []
 
-    async with MultiServerMCPClient(servers) as mcp_client:
-        tools = mcp_client.get_tools()
-        agent = create_react_agent(llm, tools, prompt=SYSTEM_PROMPT)
+    mcp_client = MultiServerMCPClient(servers)
+    tools = await mcp_client.get_tools()
+    tools_map = {t.name: t for t in tools}
 
-        for i, entity in enumerate(entities, 1):
-            print(f"\n[{i}/{len(entities)}] Researching: {entity}")
-            try:
-                response = await agent.ainvoke({
-                    "messages": [{
-                        "role": "user",
-                        "content": (
-                            f"Research this restaurant entity:\n"
-                            f"Entity: {entity}\n"
-                            f"Domain: Tunisian restaurants\n"
-                            f"Follow the research protocol and return the JSON."
-                        ),
-                    }]
-                })
-                last_content = response["messages"][-1].content
-                row = _parse_row(last_content, entity)
-            except Exception as e:
-                print(f"  -> ERROR: {e}")
-                row = {"canonical_entity": entity, "error": str(e)[:200],
-                       "overall_confidence": 0.0}
+    for i, entity in enumerate(entities, 1):
+        print(f"\n[{i}/{len(entities)}] Researching: {entity}")
+        try:
+            row = await asyncio.wait_for(
+                _research_entity_direct(tools_map, entity, location),
+                timeout=_ENTITY_TIMEOUT,
+            )
+        except asyncio.TimeoutError:
+            print(f"  -> TIMEOUT after {_ENTITY_TIMEOUT:.0f}s")
+            row = {"canonical_entity": entity, "overall_confidence": 0.0,
+                   "error": f"timeout after {_ENTITY_TIMEOUT:.0f}s"}
+        except Exception as e:
+            print(f"  -> ERROR: {e}")
+            row = {"canonical_entity": entity, "error": str(e)[:200],
+                   "overall_confidence": 0.0}
 
-            row["scrape_timestamp"] = datetime.now().isoformat()
-            results.append(row)
-            print(f"  -> confidence={row.get('overall_confidence', '?')} "
-                  f"| gm_rating={row.get('gm_rating', '?')}")
+        row["scrape_timestamp"] = datetime.now().isoformat()
+        results.append(row)
+        print(f"  -> confidence={row.get('overall_confidence', '?')} "
+              f"| gm_rating={row.get('gm_rating', '?')}")
 
     return results
 
@@ -271,10 +310,8 @@ def run_agent2_react(entities: list[str], mcp_servers_dir: str = None,
         import pandas as pd
         return pd.read_csv(CHECKPOINT_FILE).to_dict(orient="records")
 
-    llm = ChatGroq(api_key=GROQ_API_KEY, model=GROQ_MODEL, temperature=0.0)
-
-    # Single event loop for all entities
-    new_rows = asyncio.run(_research_all_async(queue, llm, servers))
+    location = "Tunisia"
+    new_rows = asyncio.run(_research_all_async(queue, servers, location))
 
     all_rows = []
     for row in new_rows:

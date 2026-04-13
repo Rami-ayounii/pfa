@@ -44,6 +44,7 @@ class GEOState(TypedDict, total=False):
 
     # ── In-memory DataFrames (no CSV hops) ───────────────────────────────────
     prompt_df: Any                  # pd.DataFrame from agent0
+    df_raw: Any                     # pd.DataFrame built once in agent1_aggregate; shared by enrich/clean/metrics
     entities_df: Any                # pd.DataFrame from agent1_extract
     enriched_df: Any                # pd.DataFrame from agent1_enrich
     clean_df: Any                   # pd.DataFrame from agent1_clean

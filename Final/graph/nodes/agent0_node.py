@@ -18,6 +18,7 @@ import pandas as pd
 from loguru import logger
 
 from graph.state import GEOState
+from core.status_tracker import emit as _emit
 from agents.agent0 import agent0_run
 from core.llm_client import MODEL_STRONG
 
@@ -38,19 +39,25 @@ def agent0_node(state: GEOState) -> dict:
     # Ensure output directory exists
     os.makedirs(output_dir, exist_ok=True)
 
+    _emit("agent0", "active", {"domain": domain, "location": location}, output_dir=output_dir)
     logger.info(f"[Agent0Node] Generating prompts — domain='{domain}', location='{location}'")
 
     MAX_PROMPTS            = 10   # absolute upper bound regardless of settings
     max_prompts_per_intent = state.get("max_prompts_per_intent", 2)
     max_reflection_loops   = state.get("max_reflection_loops", 2)
 
-    prompt_df = agent0_run(
-        domain=domain,
-        languages=languages,
-        n_intents=n_intents,
-        n_variants=n_variants,
-        max_reflection_loops=max_reflection_loops,
-    )
+    try:
+        prompt_df = agent0_run(
+            domain=domain,
+            languages=languages,
+            n_intents=n_intents,
+            n_variants=n_variants,
+            max_reflection_loops=max_reflection_loops,
+        )
+    except Exception as exc:
+        logger.error(f"[Agent0Node] agent0_run raised: {exc}")
+        _emit("agent0", "error", {"error": str(exc)}, output_dir=output_dir)
+        raise
 
     if "intent_id" in prompt_df.columns and len(prompt_df) > max_prompts_per_intent:
         # Stratified sampling: keep at most max_prompts_per_intent rows per intent.
@@ -81,4 +88,7 @@ def agent0_node(state: GEOState) -> dict:
         f"[Agent0Node] Generated {len(prompt_df)} prompts across {_n_intents} intents"
     )
 
-    return {"prompt_df": prompt_df}
+    prompts = prompt_df.to_dict(orient="records")
+    logger.debug(f"[Agent0Node] Storing {len(prompts)} prompt records into state['prompts']")
+    _emit("agent0", "done", {"prompts_count": len(prompts)}, output_dir=output_dir)
+    return {"prompt_df": prompt_df, "prompts": prompts}

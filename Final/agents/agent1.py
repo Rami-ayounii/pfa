@@ -62,6 +62,28 @@ def _track_tokens(usage: dict) -> None:
         TOKEN_USAGE[key] += usage.get(key, 0)
 
 
+def _load_resume_ids(output_path: str, id_column: str = "response_id") -> set:
+    """Load already-processed IDs from a checkpoint CSV.
+
+    Deletes the file if the expected column is missing (schema mismatch).
+    Returns an empty set on any failure so the caller starts fresh.
+    """
+    if not os.path.exists(output_path):
+        return set()
+    try:
+        df = pd.read_csv(output_path, encoding="utf-8-sig", quoting=csv.QUOTE_ALL)
+        if id_column not in df.columns:
+            print(f"Resume skipped — {output_path} has unexpected schema, starting fresh")
+            Path(output_path).unlink(missing_ok=True)
+            return set()
+        ids = set(df[id_column].unique())
+        print(f"Resuming — {len(ids)} {id_column}s already done")
+        return ids
+    except Exception as e:
+        print(f"Resume skipped — could not read {output_path}: {e}")
+        return set()
+
+
 # ── model params ───────────────────────────────────────────────────────────────
 
 def _model_params(model: str, role: str = "analyst") -> dict:
@@ -329,19 +351,31 @@ def agent1_query_prompts(
     """
 
     # resume support
-    done_keys = set()
+    done_keys: set = set()
     if os.path.exists(output_path):
-        df_existing = pd.read_csv(
-            output_path, encoding='utf-8-sig', quoting=csv.QUOTE_ALL
-        )
-        for _, row in df_existing.iterrows():
-            done_keys.add((row['prompt_id'], row['model_id'], row['run_id']))
-        print(f"Resuming - {len(done_keys)} records already saved")
+        try:
+            df_existing = pd.read_csv(output_path, encoding='utf-8-sig', quoting=csv.QUOTE_ALL)
+            required = {'prompt_id', 'model_id', 'run_id'}
+            if required.issubset(df_existing.columns):
+                done_keys = set(zip(
+                    df_existing['prompt_id'],
+                    df_existing['model_id'],
+                    df_existing['run_id'],
+                ))
+                print(f"Resuming - {len(done_keys)} records already saved")
+            else:
+                print(f"Resume skipped — {output_path} has unexpected schema, starting fresh")
+                Path(output_path).unlink(missing_ok=True)
+        except Exception as e:
+            print(f"Resume skipped — could not read {output_path}: {e}")
 
-    total_prompts  = len(prompts)
-    total_calls    = total_prompts * len(models) * n_runs
-    done_calls     = len(done_keys)
-    header_written = os.path.exists(output_path)
+    total_prompts    = len(prompts)
+    total_calls      = total_prompts * len(models) * n_runs
+    done_calls       = len(done_keys)
+    header_written   = os.path.exists(output_path)
+    new_records      = 0
+    seen_prompt_ids: set = {k[0] for k in done_keys}
+    seen_model_ids:  set = {k[1] for k in done_keys}
 
     print(f"\nStep 2: LLM querying")
     print(f"   Prompts        : {total_prompts}")
@@ -404,22 +438,23 @@ def agent1_query_prompts(
                 )
                 header_written = True
                 done_keys.add((prompt_id, model_id, run_id))
+                new_records += 1
+                seen_prompt_ids.add(prompt_id)
+                seen_model_ids.add(model_id)
 
                 print(f"     [{run_id}] {result['total_tokens']} tokens | {response_id}")
 
-    # final summary
-    df_raw = pd.read_csv(output_path, encoding='utf-8-sig', quoting=csv.QUOTE_ALL)
-
+    total_records = done_calls + new_records
     print(f"\n{'='*55}")
     print(f"Step 2 complete")
-    print(f"   Total records  : {len(df_raw)}")
-    print(f"   Prompts covered: {df_raw['prompt_id'].nunique()}")
-    print(f"   Models used    : {df_raw['model_id'].unique().tolist()}")
+    print(f"   Total records  : {total_records}")
+    print(f"   Prompts covered: {len(seen_prompt_ids)}")
+    print(f"   Models used    : {sorted(seen_model_ids)}")
     print(f"   Total tokens   : {TOKEN_USAGE['total_tokens']}")
     print(f"   Saved to       : {output_path}")
     print(f"{'='*55}")
 
-    return df_raw
+    return pd.read_csv(output_path, encoding='utf-8-sig', quoting=csv.QUOTE_ALL)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -531,24 +566,40 @@ ENTITIES_OUTPUT_PATH = os.path.join(OUTPUT_DIR, "extracted_entities.csv")
 
 
 BRAND_EXTRACTION_SYSTEM = """\
-You are a restaurant name extractor working in a GEO analysis pipeline.
+You are a restaurant name extractor working in a GEO analysis pipeline
+that studies TUNISIAN restaurants — establishments serving Tunisian /
+North-African cuisine, or restaurants located inside Tunisia.
 
 Your ONLY task is to find every named restaurant, cafe, or food business
 in the text. The text may be a numbered list, markdown table, bold headers,
 or free-form prose - read ALL formats.
 
-\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550
+════════════════════════════════════════════════════
+DOMAIN SCOPE — CRITICAL
+════════════════════════════════════════════════════
+Only extract establishments that are plausibly Tunisian:
+  + Located in Tunisia (any city)
+  + Serving Tunisian / North-African / Maghrebi cuisine
+  + Tunisian-diaspora restaurants abroad known for Tunisian food
+
+EXCLUDE any establishment that has NO Tunisian connection:
+  - Any internationally known chain or restaurant with no Tunisian /
+    North-African cuisine context in the surrounding text
+  - If the surrounding text shows no Tunisian / Maghrebi food signal
+    for that name → skip it
+
+════════════════════════════════════════════════════
 WHAT TO EXTRACT
-\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550
+════════════════════════════════════════════════════
 Extract ONLY named establishments - places with a proper name:
   + Named restaurants     "Dar El Jeld", "Le Corsaire", "Chez Ahmed"
   + Named cafes           "Cafe des Nattes", "Le Petit Cafe"
   + Named sandwich shops  "Sandwich Chez Ali", "Le Snack du Port"
   + Named food businesses "Patisserie Mabrouk", "Boulangerie Paris"
 
-\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550
+════════════════════════════════════════════════════
 WHAT TO EXCLUDE
-\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550
+════════════════════════════════════════════════════
 Exclude items that are NOT a proper establishment name:
   - Standalone dish names with no business name
     ("couscous", "brik", "mlewi", "harissa", "shakshuka", "falafel")
@@ -556,6 +607,8 @@ Exclude items that are NOT a proper establishment name:
     ("a local restaurant", "the best cafe", "street food stalls")
   - City or region names  ("Tunis", "Sfax", "Djerba", "Tunisia")
   - People names          ("Chef Ahmed", "Mohamed")
+  - Digital platforms, apps, or websites — anything that is a service for
+    finding or booking restaurants, not a physical food establishment itself
 
 NOTE: "sandwich" or "pizza" as PART of a business name is allowed.
   KEEP  -> "sandwich chez ahmed"
@@ -564,9 +617,9 @@ NOTE: "sandwich" or "pizza" as PART of a business name is allowed.
   SKIP  -> "sandwich"
   SKIP  -> "mlewi"
 
-\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550
+════════════════════════════════════════════════════
 NORMALIZATION - CRITICAL
-\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550
+════════════════════════════════════════════════════
 Every name must be byte-for-byte identical across all runs.
 
   1. Lowercase only
@@ -592,15 +645,15 @@ Every name must be byte-for-byte identical across all runs.
   4. Remove duplicates - return each name ONCE only
 
   5. Arabic names - keep as-is in Arabic script
-       "\u062f\u0627\u0631 \u0627\u0644\u062c\u0644\u062f"  -> "\u062f\u0627\u0631 \u0627\u0644\u062c\u0644\u062f"
-       "\u0645\u0637\u0639\u0645 \u0631\u0627\u0645\u064a"  -> "\u0631\u0627\u0645\u064a"
+       "دار الجلد"  -> "دار الجلد"
+       "مطعم رامي"  -> "رامي"
 
   6. Mixed script - normalize Latin part only
-       "Dar El Jeld \u062f\u0627\u0631 \u0627\u0644\u062c\u0644\u062f" -> "dar el jeld"
+       "Dar El Jeld دار الجلد" -> "dar el jeld"
 
-\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550
+════════════════════════════════════════════════════
 OUTPUT FORMAT - STRICT
-\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550
+════════════════════════════════════════════════════
 Return ONLY a flat JSON array of strings.
 First character MUST be [   Last character MUST be ]
 No objects. No nesting. No prose. No markdown. No explanation.
@@ -641,17 +694,12 @@ def agent1_extract_entities(
              intent_id · language · entity · brand_raw_text
     """
 
-    # resume support
-    done_response_ids = set()
-    if os.path.exists(output_path):
-        df_existing = pd.read_csv(
-            output_path, encoding='utf-8-sig', quoting=csv.QUOTE_ALL
-        )
-        done_response_ids = set(df_existing['response_id'].unique())
-        print(f"Resuming - {len(done_response_ids)} responses already extracted")
-
-    header_written = os.path.exists(output_path)
-    total = len(df_raw)
+    done_response_ids  = _load_resume_ids(output_path)
+    header_written     = os.path.exists(output_path)
+    total              = len(df_raw)
+    new_entity_records = 0
+    seen_entities:      set = set()
+    seen_response_ids_out: set = set(done_response_ids)
 
     print(f"\nStep 3: Entity extraction")
     print(f"   Responses to process : {total}")
@@ -721,21 +769,20 @@ def agent1_extract_entities(
             header_written = True
 
         done_response_ids.add(response_id)
-
-    # final summary
-    df_entities = pd.read_csv(
-        output_path, encoding='utf-8-sig', quoting=csv.QUOTE_ALL
-    )
+        seen_response_ids_out.add(response_id)
+        new_entity_records += len(records)
+        for r in records:
+            seen_entities.add(r["entity"])
 
     print(f"\n{'='*55}")
     print(f"Step 3 complete")
-    print(f"   Total entity records : {len(df_entities)}")
-    print(f"   Unique entities      : {df_entities['entity'].nunique()}")
-    print(f"   Responses processed  : {df_entities['response_id'].nunique()}")
+    print(f"   Total entity records : {new_entity_records}")
+    print(f"   Unique entities      : {len(seen_entities)}")
+    print(f"   Responses processed  : {len(seen_response_ids_out)}")
     print(f"   Saved to             : {output_path}")
     print(f"{'='*55}")
 
-    return df_entities
+    return pd.read_csv(output_path, encoding='utf-8-sig', quoting=csv.QUOTE_ALL)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -758,7 +805,7 @@ HOW TO RANK
 - Prose response: use the sentence order of first mention
 - Position 1 = first mentioned entity
 
-OUTPUT FORMAT \u2014 STRICT
+OUTPUT FORMAT — STRICT
 Return ONLY a flat JSON array of strings in ranked order.
 First character MUST be [   Last character MUST be ]
 
@@ -859,16 +906,10 @@ def agent1_enrich_entities(
         how="left"
     )
 
-    # resume support
-    done_response_ids = set()
-    if os.path.exists(output_path):
-        df_existing = pd.read_csv(output_path, encoding="utf-8-sig", quoting=csv.QUOTE_ALL)
-        done_response_ids = set(df_existing["response_id"].unique())
-        print(f"Resuming \u2014 {len(done_response_ids)} responses already done")
-
+    done_response_ids = _load_resume_ids(output_path)
     header_written = os.path.exists(output_path)
 
-    # PHASE A \u2014 ranking extraction
+    # PHASE A — ranking extraction
     print("\nPhase A \u2014 Ranking extraction per response")
 
     ranking_map = {}
@@ -943,16 +984,13 @@ def agent1_enrich_entities(
             quoting=csv.QUOTE_ALL
         )
 
-    # final summary
-    df_enriched = pd.read_csv(output_path, encoding="utf-8-sig", quoting=csv.QUOTE_ALL)
-
     print("\nStep 4 complete")
-    print(f"Total records: {len(df_enriched)}")
-    print(f"Unique entities: {df_enriched['entity'].nunique()}")
-    print(f"Prompts covered: {df_enriched['prompt_id'].nunique()}")
+    print(f"Total records: {len(records)}")
+    print(f"Unique entities: {len({r['entity'] for r in records})}")
+    print(f"Prompts covered: {len({r['prompt_id'] for r in records})}")
     print(f"Saved to: {output_path}")
 
-    return df_enriched
+    return pd.read_csv(output_path, encoding="utf-8-sig", quoting=csv.QUOTE_ALL)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1068,14 +1106,14 @@ def phase_b_fuzzy_cluster(
 
 ARBITRATION_SYSTEM = """\
 You are an entity resolution and validation specialist for a restaurant
-GEO analysis pipeline analyzing Tunisian restaurants
-(in Tunisia and abroad including Paris and other cities).
+GEO analysis pipeline studying TUNISIAN restaurants — establishments
+serving Tunisian / North-African cuisine, or restaurants located in Tunisia.
 
 You have TWO tasks:
 
-TASK 1 \u2014 PAIR RESOLUTION
+TASK 1 — PAIR RESOLUTION
 Decide if each pair refers to the SAME physical restaurant or DIFFERENT.
-Be CONSERVATIVE \u2014 when in doubt return DIFFERENT.
+Be CONSERVATIVE — when in doubt return DIFFERENT.
 
 SAME only when:
   - Pure spelling or article variant of identical place
@@ -1088,23 +1126,27 @@ DIFFERENT when:
   - Different proper nouns even if similar theme
   - Any genuine doubt                  -> DIFFERENT
 
-TASK 2 \u2014 ENTITY VALIDATION
-For each entity and its context, decide if it is a real
-restaurant, cafe, or food business.
+TASK 2 — ENTITY VALIDATION
+For each entity and its context, decide if it is a real Tunisian /
+North-African restaurant, cafe, or food business.
 
-IMPORTANT \u2014 be very conservative:
-  - If context mentions food, dining, service, cuisine -> valid = true
-  - Names like "le sfax", "le djerba", "le marrakech", "le bardo"
-    are Paris restaurants named after cities -> valid = true
-  - Only invalidate if context CLEARLY describes something
-    that is NOT a restaurant:
-      a mosque, museum, monument, mathematician,
-      a standalone dish with no restaurant context,
-      a city or region with no restaurant context
-  - When uncertain -> valid = true
-  - Prefer false negatives over false positives
+VALIDATION RULES (apply in order):
+  1. Valid = true  if context clearly mentions Tunisian or North-African
+     food culture (couscous, brik, harissa, tajine, merguez, lablabi,
+     malouf, Tunisian, Maghrebi, North African, Carthage, Medina …)
+  2. Valid = true  if the name evokes Tunisian culture even with thin context
+     ("dar zarrouk", "le bardo", "chez slah", "le sfax", "le djerba",
+      "el ali", "la mamma tunisienne" …)
+  3. Valid = false if the entity is a digital platform, app, or website
+     used to find or book restaurants — not a physical establishment itself
+  4. Valid = false if the entity is an internationally famous establishment
+     with NO Tunisian or North-African food context in the surrounding text
+     — the context is the deciding factor, not the name itself
+  5. Valid = false if context clearly describes a non-food entity
+     (mosque, museum, monument, mathematician, city name alone …)
+  6. When genuinely uncertain AND no Tunisian/Maghrebi signal → valid = false
 
-OUTPUT FORMAT \u2014 strict JSON object, no prose, no markdown:
+OUTPUT FORMAT — strict JSON object, no prose, no markdown:
 {
   "pair_resolutions": [
     {
@@ -1174,8 +1216,8 @@ def phase_c_llm_arbitration(
               f"\u2014 {len(pair_batch)} pairs, {len(entity_batch)} entities")
 
         prompt = (
-            f"TASK 1 \u2014 Resolve {len(pair_batch)} restaurant name pairs.\n"
-            f"TASK 2 \u2014 Validate {len(entity_batch)} entities using context.\n\n"
+            f"TASK 1 — Resolve {len(pair_batch)} restaurant name pairs.\n"
+            f"TASK 2 — Validate {len(entity_batch)} entities using context.\n\n"
             + (
                 "Pairs:\n"
                 + json.dumps(
@@ -1271,10 +1313,10 @@ for a Tunisian restaurant GEO analysis pipeline.
 Review the cleaning log and current canonical mappings.
 Identify any suspicious or incorrect decisions.
 
-Be critical \u2014 a wrong merge is worse than a missed merge.
+Be critical — a wrong merge is worse than a missed merge.
 A wrongly invalidated restaurant loses real data.
 
-IMPORTANT \u2014 restaurants named after cities like "le sfax", "le djerba",
+IMPORTANT — restaurants named after cities like "le sfax", "le djerba",
 "le bardo", "le marrakech" are valid Paris Tunisian restaurants.
 Flag any invalidation of these as suspicious.
 

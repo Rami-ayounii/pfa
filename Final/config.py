@@ -49,7 +49,7 @@ GROQ_BASE_URL = os.environ.get("GROQ_BASE_URL", "")
 MODEL_FAST      = os.environ.get("MODEL_FAST",      "llama-3.1-8b-instant")
 MODEL_STRONG    = os.environ.get("MODEL_STRONG",    "llama-3.3-70b-versatile")
 MODEL_GPTOSS    = os.environ.get("MODEL_GPTOSS",    "openai/gpt-oss-20b")
-MODEL_EXTRACTOR = os.environ.get("MODEL_EXTRACTOR", "llama-3.1-8b-instant")
+MODEL_EXTRACTOR = os.environ.get("MODEL_EXTRACTOR", "gemma2-9b-it")
 
 # Tier 2 — Preview
 MODEL_QWEN      = os.environ.get("MODEL_QWEN",   "qwen/qwen3-32b")
@@ -68,27 +68,57 @@ MODEL_EXTRACTOR2     = os.environ.get("MODEL_EXTRACTOR2",     "llama-3.3-70b-ver
 MODEL_EXTRACTOR3     = os.environ.get("MODEL_EXTRACTOR3",     "llama-3.1-8b-instant")
 GROQ_MODEL           = os.environ.get("GROQ_MODEL",           "llama-3.3-70b-versatile")
 
-# Default query diversity pair — both FREE, 1K RPM
-DEFAULT_QUERY_MODELS = [MODEL_FAST, MODEL_GPTOSS]
+# 4 diverse query models: 2 Groq + 2 OpenRouter (different TPM pools)
+DEFAULT_QUERY_MODELS = [
+    MODEL_STRONG,   # llama-3.3-70b-versatile  (Groq, tier 0, 300K TPM)
+    MODEL_LLAMA4,   # llama-4-scout             (Groq, tier 0, 300K TPM — separate quota)
+    MODEL_QWEN,     # qwen/qwen3-32b            (OpenRouter, tier 0)
+    MODEL_GPTOSS,   # openai/gpt-oss-20b        (OpenRouter, tier 1)
+]
 
 # Groq fallback chain (tried in order on 429 rate-limit errors)
-GROQ_FALLBACK_CHAIN = [MODEL_STRONG, MODEL_QWEN, MODEL_FAST, "llama3-8b-8192"]
+GROQ_FALLBACK_CHAIN = [
+    MODEL_STRONG,           # 70B — best quality
+    MODEL_LLAMA4,           # llama-4-scout — new strong
+    MODEL_QWEN,             # qwen3-32b — multilingual
+    MODEL_EXTRACTOR,        # gemma2-9B — fast structured
+    MODEL_FAST,             # 8B-instant — fastest
+    "llama3-8b-8192",       # legacy last resort
+]
 
 # OpenRouter model list (comma-separated env var overrides)
+# Ordered by quality; rotate through all on 429 — having 7+ models means
+# even if the first 2-3 are rate-limited we still get a fast response.
 _or_env = os.environ.get("OPENROUTER_MODELS", "")
 OPENROUTER_MODELS = (
     [m.strip() for m in _or_env.split(",") if m.strip()]
     if _or_env else [
-        "meta-llama/llama-3.2-3b-instruct:free",
+        # Tier 0 — largest / strongest
+        "openai/gpt-oss-120b:free",
+        "nvidia/nemotron-3-super-120b-a12b:free",
+        "nousresearch/hermes-3-llama-3.1-405b:free",
+        "qwen/qwen3-next-80b-a3b-instruct:free",
+        "qwen/qwen3.6-plus:free",
+        # Tier 1 — solid mid-size
+        "openai/gpt-oss-20b:free",
         "meta-llama/llama-3.3-70b-instruct:free",
-        "mistralai/mistral-7b-instruct:free",
+        "google/gemma-3-27b-it:free",
+        "minimax/minimax-m2.5:free",
+        "z-ai/glm-4.5-air:free",
+        # Tier 2 — fast / small fallbacks
+        "google/gemma-3-12b-it:free",
+        "stepfun/step-3.5-flash:free",
+        "nvidia/nemotron-nano-12b-v2-vl:free",
+        "meta-llama/llama-3.2-3b-instruct:free",
     ]
 )
 
 # ── Concurrency controls ──────────────────────────────────────────────────────
-MAX_CONCURRENT_LLM    = int(os.environ.get("MAX_CONCURRENT_LLM",    "3"))
+MAX_CONCURRENT_LLM    = int(os.environ.get("MAX_CONCURRENT_LLM",    "5"))
 MAX_CONCURRENT_BRANDS = int(os.environ.get("MAX_CONCURRENT_BRANDS", "3"))
+MAX_CONCURRENT_OR     = int(os.environ.get("MAX_CONCURRENT_OR",     "2"))   # OpenRouter free tier
 GROQ_RPM              = int(os.environ.get("GROQ_RPM",              "1000"))
+OR_RPM                = int(os.environ.get("OR_RPM",                "18"))  # OpenRouter free ~20/min, keep 10% headroom
 
 # ── Agent defaults ────────────────────────────────────────────────────────────
 N_RUNS               = int(os.environ.get("N_RUNS",               "1"))
@@ -104,7 +134,10 @@ INTER_PROMPT_DELAY_S = float(os.environ.get("INTER_PROMPT_DELAY_S", "0.6"))
 GROQ_TPM_LIMIT = int(os.environ.get("GROQ_TPM_LIMIT", "280000"))
 
 # ── Output paths ──────────────────────────────────────────────────────────────
-OUTPUT_DIR       = os.environ.get("OUTPUT_DIR",       "geo_output")
+# Use an absolute path anchored to Final/ so the pipeline and status_server.py
+# always agree on the output location regardless of the working directory.
+_THIS_DIR        = Path(__file__).parent
+OUTPUT_DIR       = os.environ.get("OUTPUT_DIR", str(_THIS_DIR / "geo_output"))
 AGENT2_OUTPUT_DIR = os.environ.get("AGENT2_OUTPUT_DIR", "agent2_output")
 
 RAW_OUTPUT_PATH         = f"{OUTPUT_DIR}/raw_responses.csv"
