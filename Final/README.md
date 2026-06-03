@@ -10,9 +10,9 @@ Add to `claude_desktop_config.json`:
 {
   "mcpServers": {
     "geo-pipeline": {
-      "command": "C:\\Users\\ayoun\\anaconda3\\python.exe",
-      "args": ["D:\\Rami IDSD\\Projects\\pfa agentic\\Final\\mcp_server.py"],
-      "cwd": "D:\\Rami IDSD\\Projects\\pfa agentic\\Final"
+      "command": "C:\\path\\python.exe",
+      "args": ["D:\\path\\mcp_server.py"],
+      "cwd": "D:\\path\\Final"
     }
   }
 }
@@ -49,8 +49,8 @@ Used by the ReAct agent for tool-calling:
 
 ```bash
 # Start external MCP server (stdio)
-/c/Users/ayoun/anaconda3/python.exe mcp_server.py
+/c/path/python.exe mcp_server.py
 
 # Run full pipeline
-/c/Users/ayoun/anaconda3/python.exe pipeline.py --query "Restaurants in Sfax"
+/c/path/python.exe pipeline.py --query "Restaurants in Sfax"
 ```
